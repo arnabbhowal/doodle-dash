@@ -11,9 +11,7 @@ import {
 } from "spacetimedb";
 
 export const params = {
-  roundId: __t.u64(),
-  playerId: __t.u64(),
   imageBase64: __t.string(),
   word: __t.string(),
 };
-export const returnType = __t.i32()
+export const returnType = __t.string()

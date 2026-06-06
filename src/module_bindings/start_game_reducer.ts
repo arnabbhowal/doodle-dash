@@ -11,7 +11,9 @@ import {
 } from "spacetimedb";
 
 export default {
+  roomId: __t.u64(),
   totalRounds: __t.u32(),
   wordSource: __t.string(),
-  customWords: __t.option(__t.string()),
+  customWords: __t.string(),
+  roundDuration: __t.u32(),
 };

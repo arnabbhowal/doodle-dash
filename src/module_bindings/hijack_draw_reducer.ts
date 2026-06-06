@@ -11,5 +11,10 @@ import {
 } from "spacetimedb";
 
 export default {
-  code: __t.string(),
+  roundId: __t.u64(),
+  toPlayerId: __t.u64(),
+  seq: __t.u32(),
+  pts: __t.string(),
+  color: __t.string(),
+  size: __t.f64(),
 };

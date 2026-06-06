@@ -12,12 +12,5 @@ import {
 
 export default __t.row({
   roomId: __t.u64().primaryKey().name("room_id"),
-  code: __t.string(),
-  hostIdentity: __t.identity().name("host_identity"),
-  status: __t.string(),
-  totalRounds: __t.u32().name("total_rounds"),
-  currentRound: __t.u32().name("current_round"),
-  wordSource: __t.string().name("word_source"),
-  roundDurationSecs: __t.u32().name("round_duration_secs"),
-  createdAt: __t.timestamp().name("created_at"),
+  deadline: __t.timestamp(),
 });

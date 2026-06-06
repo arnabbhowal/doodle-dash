@@ -18,5 +18,5 @@ export default __t.row({
   toPlayerId: __t.u64().name("to_player_id"),
   effect: __t.string(),
   active: __t.bool(),
-  createdAt: __t.u64().name("created_at"),
+  createdAt: __t.timestamp().name("created_at"),
 });

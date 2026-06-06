@@ -6,23 +6,51 @@
 import { type Infer as __Infer } from "spacetimedb";
 
 // Import all reducer arg schemas
+import CloseGradingReducer from "../close_grading_reducer";
 import CreateRoomReducer from "../create_room_reducer";
 import EndGameReducer from "../end_game_reducer";
+import HijackDrawReducer from "../hijack_draw_reducer";
 import JoinRoomReducer from "../join_room_reducer";
 import KickPlayerReducer from "../kick_player_reducer";
 import NextRoundReducer from "../next_round_reducer";
+import OfferReplayReducer from "../offer_replay_reducer";
+import PeekDrawReducer from "../peek_draw_reducer";
+import RecordScoreReducer from "../record_score_reducer";
+import RecordScoreForReducer from "../record_score_for_reducer";
+import ResolveReplayReducer from "../resolve_replay_reducer";
+import RevealRoundReducer from "../reveal_round_reducer";
+import SeedWordsReducer from "../seed_words_reducer";
 import SetConfigReducer from "../set_config_reducer";
+import SetHijackCanvasReducer from "../set_hijack_canvas_reducer";
+import SetLiveCanvasReducer from "../set_live_canvas_reducer";
+import SetSpectateReducer from "../set_spectate_reducer";
 import StartGameReducer from "../start_game_reducer";
 import SubmitDrawingReducer from "../submit_drawing_reducer";
+import SubmitGuessReducer from "../submit_guess_reducer";
 import UseSabotageReducer from "../use_sabotage_reducer";
+import VoteReplayReducer from "../vote_replay_reducer";
 
+export type CloseGradingParams = __Infer<typeof CloseGradingReducer>;
 export type CreateRoomParams = __Infer<typeof CreateRoomReducer>;
 export type EndGameParams = __Infer<typeof EndGameReducer>;
+export type HijackDrawParams = __Infer<typeof HijackDrawReducer>;
 export type JoinRoomParams = __Infer<typeof JoinRoomReducer>;
 export type KickPlayerParams = __Infer<typeof KickPlayerReducer>;
 export type NextRoundParams = __Infer<typeof NextRoundReducer>;
+export type OfferReplayParams = __Infer<typeof OfferReplayReducer>;
+export type PeekDrawParams = __Infer<typeof PeekDrawReducer>;
+export type RecordScoreParams = __Infer<typeof RecordScoreReducer>;
+export type RecordScoreForParams = __Infer<typeof RecordScoreForReducer>;
+export type ResolveReplayParams = __Infer<typeof ResolveReplayReducer>;
+export type RevealRoundParams = __Infer<typeof RevealRoundReducer>;
+export type SeedWordsParams = __Infer<typeof SeedWordsReducer>;
 export type SetConfigParams = __Infer<typeof SetConfigReducer>;
+export type SetHijackCanvasParams = __Infer<typeof SetHijackCanvasReducer>;
+export type SetLiveCanvasParams = __Infer<typeof SetLiveCanvasReducer>;
+export type SetSpectateParams = __Infer<typeof SetSpectateReducer>;
 export type StartGameParams = __Infer<typeof StartGameReducer>;
 export type SubmitDrawingParams = __Infer<typeof SubmitDrawingReducer>;
+export type SubmitGuessParams = __Infer<typeof SubmitGuessReducer>;
 export type UseSabotageParams = __Infer<typeof UseSabotageReducer>;
+export type VoteReplayParams = __Infer<typeof VoteReplayReducer>;
 

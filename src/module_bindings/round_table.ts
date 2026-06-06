@@ -16,6 +16,6 @@ export default __t.row({
   roundNumber: __t.u32().name("round_number"),
   word: __t.string(),
   status: __t.string(),
-  startedAt: __t.u64().name("started_at"),
-  endsAt: __t.u64().name("ends_at"),
+  startedAt: __t.timestamp().name("started_at"),
+  endsAt: __t.timestamp().name("ends_at"),
 });

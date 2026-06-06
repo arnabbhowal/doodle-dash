@@ -10,6 +10,13 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-export default {
-  code: __t.string(),
-};
+export default __t.row({
+  strokeId: __t.u64().primaryKey().name("stroke_id"),
+  roundId: __t.u64().name("round_id"),
+  roomId: __t.u64().name("room_id"),
+  playerId: __t.u64().name("player_id"),
+  seq: __t.u32(),
+  pts: __t.string(),
+  color: __t.string(),
+  size: __t.f64(),
+});

@@ -1,791 +1,898 @@
 'use client';
 
-import { useState, useEffect, useMemo, use } from 'react';
-import { useRouter } from 'next/navigation';
-import { useSpacetimeDB, useTable, useReducer } from 'spacetimedb/react';
-import { tables, reducers } from '../../../src/module_bindings';
+import { useEffect, useRef, useState } from 'react';
+import { useParams, useRouter } from 'next/navigation';
+import { useReducer, useTable, useProcedure } from 'spacetimedb/react';
+import { motion } from 'motion/react';
+import confetti from 'canvas-confetti';
+import { QRCodeSVG } from 'qrcode.react';
+import { reducers, tables, procedures } from '../../../src/module_bindings';
+import type { Drawing, Player } from '../../../src/module_bindings/types';
+import { selectPending, roundFullyScored } from '../../../lib/scoring';
+import { BrutalButton } from '../../components/BrutalButton';
+import { BrutalCard } from '../../components/BrutalCard';
+import { CountUp } from '../../components/CountUp';
 
-interface HostPageProps {
-  params: Promise<{ code: string }>;
+const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000';
+
+function getSecondsLeft(endsAtMs: number) {
+  return Math.max(0, Math.ceil((endsAtMs - Date.now()) / 1000));
 }
 
-export default function HostPage({ params }: HostPageProps) {
-  const router = useRouter();
-  const resolvedParams = use(params);
-  const roomCode = resolvedParams.code.toUpperCase();
+const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
 
-  const { isActive: connected, identity, getConnection } = useSpacetimeDB();
-  const conn = getConnection();
+// Fetch a (public Supabase) image URL and return base64 with no data: prefix.
+async function urlToBase64(url: string): Promise<string> {
+  const res = await fetch(url);
+  const blob = await res.blob();
+  return await new Promise<string>((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onloadend = () => resolve(String(fr.result).split(',')[1] ?? '');
+    fr.onerror = () => reject(fr.error);
+    fr.readAsDataURL(blob);
+  });
+}
 
-  // Reducer Hooks
-  const startGameReducer = useReducer(reducers.startGame);
-  const nextRoundReducer = useReducer(reducers.nextRound);
-  const endGameReducer = useReducer(reducers.endGame);
-  const kickPlayerReducer = useReducer(reducers.kickPlayer);
-
-  // Table Hooks
-  const [rooms, roomsReady] = useTable(tables.room);
-  const [players, playersReady] = useTable(tables.player);
-  const [rounds, roundsReady] = useTable(tables.round);
-  const [drawings, drawingsReady] = useTable(tables.drawing);
-
-  // Local config states (lobby only)
-  const [totalRounds, setTotalRounds] = useState(3);
-  const [wordSource, setWordSource] = useState<'preset' | 'custom'>('preset');
-  const [customWords, setCustomWords] = useState('');
-
-  // Active round timer state
-  const [timeLeft, setTimeLeft] = useState(30);
-
-  // Reveal phase animation states
-  const [revealIndex, setRevealIndex] = useState(0);
-
-  // Subscribe to tables
-  useEffect(() => {
-    if (!conn || !connected) return;
-    conn.subscriptionBuilder().subscribe([
-      tables.room,
-      tables.player,
-      tables.round,
-      tables.drawing,
-    ]);
-  }, [conn, connected]);
-
-  // Find current room
-  const room = useMemo(() => rooms.find(r => r.code === roomCode), [rooms, roomCode]);
-
-  // Find all players in this room
-  const roomPlayers = useMemo(() => {
-    if (!room) return [];
-    return players
-      .filter(p => p.roomId === room.roomId)
-      .sort((a, b) => b.totalScore - a.totalScore); // Sort by score descending
-  }, [players, room]);
-
-  // Find current round
-  const currentRound = useMemo(() => {
-    if (!room) return null;
-    return rounds.find(r => r.roomId === room.roomId && r.roundNumber === room.currentRound);
-  }, [rounds, room]);
-
-  // Find drawings for current round
-  const currentDrawings = useMemo(() => {
-    if (!currentRound) return [];
-    return drawings.filter(d => d.roundId === currentRound.roundId);
-  }, [drawings, currentRound]);
-
-  // QR Code Join URL
-  const joinUrl = useMemo(() => {
-    if (typeof window === 'undefined') return '';
-    return `${window.location.origin}/join/${roomCode}`;
-  }, [roomCode]);
-
-  const qrUrl = useMemo(() => {
-    return `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(joinUrl)}`;
-  }, [joinUrl]);
-
-  // Sync Timer for active round
-  useEffect(() => {
-    if (!currentRound || currentRound.status !== 'drawing') return;
-
-    const interval = setInterval(() => {
-      const endsAtSeconds = Number(currentRound.endsAt / 1000000n);
-      const nowSeconds = Date.now() / 1000;
-      const left = Math.max(0, Math.ceil(endsAtSeconds - nowSeconds));
-      setTimeLeft(left);
-      
-      // If timer is out, clear interval
-      if (left <= 0) {
-        clearInterval(interval);
-      }
-    }, 200);
-
-    return () => clearInterval(interval);
-  }, [currentRound]);
-
-  // Auto-scavenge judging triggers on host if some player drawings are stuck unscored
-  useEffect(() => {
-    if (!room || room.status !== 'scoring' || !currentRound || !conn) return;
-
-    // Check drawings that are submitted but NOT scored
-    const unscored = currentDrawings.filter(d => d.submitted && !d.scored && d.imageUrl);
-    if (unscored.length === 0) return;
-
-    // Trigger score_drawing procedure on behalf of players (failsafe)
-    const runFailsafeScoring = async () => {
-      for (const dw of unscored) {
-        try {
-          console.log(`Failsafe: Host triggering scoring for player ID ${dw.playerId}`);
-          const imgUrl = dw.imageUrl;
-          if (!imgUrl) continue;
-          
-          const response = await fetch(imgUrl);
-          const blob = await response.blob();
-          const reader = new FileReader();
-          reader.readAsDataURL(blob);
-          reader.onloadend = () => {
-            const base64data = (reader.result as string).split(',')[1];
-            conn.procedures.scoreDrawing({
-              roundId: currentRound.roundId,
-              playerId: dw.playerId,
-              imageBase64: base64data,
-              word: currentRound.word
-            }).catch(err => console.error("Failsafe scoring error:", err));
-          };
-        } catch (e) {
-          console.error("Failsafe fetching error:", e);
-        }
-      }
-    };
-
-    runFailsafeScoring();
-  }, [room?.status, currentDrawings, currentRound, conn]);
-
-  // Reset reveal index when transitioning to reveal phase
-  useEffect(() => {
-    if (room?.status === 'reveal') {
-      setRevealIndex(0);
+// Run fn over items with bounded parallelism (multithreaded, but we await ALL of
+// them before returning). Keeps us from hammering Gemini with N simultaneous
+// calls (the old thundering-herd that caused the 429 → silent-0 bug).
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i]);
     }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length || 1) }, worker));
+  return results;
+}
+
+function hexToRgb(hex: string): [number, number, number] {
+  const h = hex.replace('#', '');
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+
+// Flood fill on the host's replay canvas (mirrors the player's Fill tool). Tolerant of
+// anti-aliased edges, like the player-side fill.
+function hostFloodFill(ctx: CanvasRenderingContext2D, sx: number, sy: number, hex: string) {
+  const w = ctx.canvas.width, h = ctx.canvas.height;
+  if (sx < 0 || sy < 0 || sx >= w || sy >= h) return;
+  const img = ctx.getImageData(0, 0, w, h);
+  const data = img.data;
+  const s = (sy * w + sx) * 4;
+  const tr = data[s], tg = data[s + 1], tb = data[s + 2], ta = data[s + 3];
+  const [fr, fg, fb] = hexToRgb(hex);
+  if (tr === fr && tg === fg && tb === fb && ta === 255) return;
+  const tol = 48;
+  const stack = [sy * w + sx];
+  while (stack.length) {
+    const p = stack.pop()!;
+    const i = p * 4;
+    if (Math.abs(data[i] - tr) > tol || Math.abs(data[i + 1] - tg) > tol ||
+        Math.abs(data[i + 2] - tb) > tol || Math.abs(data[i + 3] - ta) > tol) continue;
+    data[i] = fr; data[i + 1] = fg; data[i + 2] = fb; data[i + 3] = 255;
+    const x = p % w;
+    if (x > 0) stack.push(p - 1);
+    if (x < w - 1) stack.push(p + 1);
+    if (p >= w) stack.push(p - w);
+    if (p < w * (h - 1)) stack.push(p + w);
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+// Replay a player's streamed Peek ops onto the host's canvas. Most ops are stroke
+// batches ([nx,ny,down] points, down=1 starting a segment). Two sentinels mirror the
+// non-stroke tools: color '!clear' wipes the canvas, '!fill:<hex>' flood-fills at the
+// point. Replaying the full ordered list reconstructs erases/fills/clears correctly.
+function renderPeekStrokes(
+  canvas: HTMLCanvasElement,
+  strokes: { seq: number; pts: string; color: string; size: number }[],
+) {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const W = canvas.width, H = canvas.height, minD = Math.min(W, H);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, W, H);
+  let last: { x: number; y: number } | null = null;
+  for (const s of strokes) {
+    if (s.color === '!clear') { ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H); last = null; continue; }
+    if (s.color.startsWith('!fill:')) {
+      let fp: number[][];
+      try { fp = JSON.parse(s.pts); } catch { continue; }
+      if (fp[0]) hostFloodFill(ctx, Math.floor(fp[0][0] * W), Math.floor(fp[0][1] * H), s.color.slice(6));
+      last = null;
+      continue;
+    }
+    const lw = Math.max(1, s.size * minD);
+    ctx.strokeStyle = s.color;
+    ctx.fillStyle = s.color;
+    ctx.lineWidth = lw;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    let pts: number[][];
+    try { pts = JSON.parse(s.pts); } catch { continue; }
+    for (const p of pts) {
+      const x = p[0] * W, y = p[1] * H;
+      if (p[2]) { ctx.beginPath(); ctx.arc(x, y, lw / 2, 0, Math.PI * 2); ctx.fill(); last = { x, y }; }
+      else if (last) { ctx.beginPath(); ctx.moveTo(last.x, last.y); ctx.lineTo(x, y); ctx.stroke(); last = { x, y }; }
+      else last = { x, y };
+    }
+  }
+}
+
+export default function HostPage() {
+  const { code } = useParams<{ code: string }>();
+  const router = useRouter();
+  // ── Reducers ──────────────────────────────────────────────────────────────
+  const startGame      = useReducer(reducers.startGame);
+  const kickPlayer     = useReducer(reducers.kickPlayer);
+  const nextRound      = useReducer(reducers.nextRound);
+  const scoreDrawing   = useProcedure(procedures.scoreDrawing);
+  const recordScoreFor = useReducer(reducers.recordScoreFor);
+
+  // ── Subscriptions ─────────────────────────────────────────────────────────
+  const [rooms]     = useTable(tables.room.where(r => r.code.eq(code)));
+  const room        = rooms[0];
+  const roomId      = room?.roomId;
+
+  const [players]   = useTable(tables.player.where(r => r.roomId.eq(roomId ?? 0n)), { enabled: !!roomId });
+  const [rounds]    = useTable(tables.round.where(r => r.roomId.eq(roomId ?? 0n)), { enabled: !!roomId });
+  const [drawings]  = useTable(tables.drawing.where(r => r.roomId.eq(roomId ?? 0n)), { enabled: !!roomId });
+  const [guesses]   = useTable(tables.guess);
+  // Host "Peek": spectate players drawing live via streamed strokes (read-only).
+  const [spectateRows] = useTable(tables.spectate.where(r => r.roomId.eq(roomId ?? 0n)), { enabled: !!roomId });
+  const spectateActive = spectateRows[0]?.active ?? false;
+  const [peekStrokes]  = useTable(tables.peek_stroke.where(r => r.roomId.eq(roomId ?? 0n)), { enabled: !!roomId && spectateActive });
+  const setSpectate    = useReducer(reducers.setSpectate);
+  const [peekIdx, setPeekIdx] = useState(0);
+  const peekCanvasRef  = useRef<HTMLCanvasElement>(null);
+  const closeGrading = useReducer(reducers.closeGrading);
+  const [replays]   = useTable(tables.replay.where(r => r.roomId.eq(roomId ?? 0n)), { enabled: !!roomId });
+  const [replayVotes] = useTable(tables.replay_vote.where(r => r.roomId.eq(roomId ?? 0n)), { enabled: !!roomId });
+  const offerReplay   = useReducer(reducers.offerReplay);
+  const resolveReplay = useReducer(reducers.resolveReplay);
+  const replayOffer   = replays[0];
+
+  // Play Again: tick a countdown while an offer is open, and resolve it (host-driven)
+  // once everyone has voted OR the 10s window elapses. resolve_replay is idempotent.
+  const [replayNow, setReplayNow] = useState(Date.now());
+  useEffect(() => {
+    if (!replayOffer) return;
+    const id = setInterval(() => setReplayNow(Date.now()), 300);
+    return () => clearInterval(id);
+  }, [replayOffer?.roomId]);
+  const replaySecsLeft = replayOffer
+    ? Math.max(0, Math.ceil((Number(replayOffer.deadline.microsSinceUnixEpoch / 1000n) - replayNow) / 1000))
+    : 0;
+  const replayYes = replayVotes.filter(v => v.accept).length;
+  useEffect(() => {
+    if (!replayOffer || !room) return;
+    const allVoted = players.length > 0 && replayVotes.length >= players.length;
+    const deadlineMs = Number(replayOffer.deadline.microsSinceUnixEpoch / 1000n);
+    if (allVoted) { resolveReplay({ roomId: room.roomId }); return; }
+    const t = setTimeout(() => resolveReplay({ roomId: room.roomId }), Math.max(0, deadlineMs - Date.now()) + 250);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [replayOffer?.roomId, replayVotes.length, players.length]);
+
+  // ── Host config state ─────────────────────────────────────────────────────
+  const [totalRounds,   setTotalRounds]   = useState(3);
+  const [roundDuration, setRoundDuration] = useState(60);
+  const [wordSource,    setWordSource]    = useState<'preset' | 'custom'>('preset');
+  const [customWords,   setCustomWords]   = useState('');
+
+  // ── Countdown ─────────────────────────────────────────────────────────────
+  const [secondsLeft, setSecondsLeft] = useState(30);
+  const currentRound = rounds.find(r => r.roundNumber === room?.currentRound);
+
+  useEffect(() => {
+    if (!currentRound || room?.status !== 'in_round') return;
+    const endsAtMs = Number(currentRound.endsAt.microsSinceUnixEpoch / 1000n);
+    const tick = () => setSecondsLeft(getSecondsLeft(endsAtMs));
+    tick();
+    const id = setInterval(tick, 200);
+    return () => clearInterval(id);
+  }, [currentRound?.roundId, room?.status]);
+
+  // Peek: auto-shuffle to the next player every ~3.5s while spectating.
+  useEffect(() => {
+    if (!spectateActive || room?.status !== 'in_round') return;
+    const id = setInterval(() => setPeekIdx(i => i + 1), 3500);
+    return () => clearInterval(id);
+  }, [spectateActive, room?.status]);
+
+  // Which player we're currently peeking at (top-level so the redraw effect can use it).
+  const peekSafeIdx = players.length ? ((peekIdx % players.length) + players.length) % players.length : 0;
+  const peekPlayer  = players.length ? players[peekSafeIdx] : null;
+  const peekPlayerHasStrokes = peekPlayer ? peekStrokes.some(s => s.playerId === peekPlayer.playerId) : false;
+
+  // Replay the viewed player's streamed strokes onto the peek canvas, live. Re-runs as
+  // new strokes arrive (peekStrokes changes) and when we shuffle to another player.
+  useEffect(() => {
+    const canvas = peekCanvasRef.current;
+    if (!canvas || !spectateActive || room?.status !== 'in_round' || !peekPlayer) return;
+    const strokes = peekStrokes
+      .filter(s => s.playerId === peekPlayer.playerId)
+      .sort((a, b) => a.seq - b.seq)
+      .map(s => ({ seq: s.seq, pts: s.pts, color: s.color, size: s.size }));
+    renderPeekStrokes(canvas, strokes);
+  }, [spectateActive, room?.status, peekPlayer?.playerId, peekStrokes]);
+
+  // Self-grade window countdown (ends_at is repurposed as the grade deadline during
+  // 'scoring'); the host holds AI scoring until it elapses.
+  const [scoringNow, setScoringNow] = useState(Date.now());
+  useEffect(() => {
+    if (room?.status !== 'scoring') return;
+    const id = setInterval(() => setScoringNow(Date.now()), 300);
+    return () => clearInterval(id);
+  }, [room?.status]);
+  const gradeSecsLeft = currentRound && room?.status === 'scoring'
+    ? Math.max(0, Math.ceil((Number(currentRound.endsAt.microsSinceUnixEpoch / 1000n) - scoringNow) / 1000))
+    : 0;
+
+  // Confetti celebration when the game finishes (presentation only)
+  useEffect(() => {
+    if (room?.status !== 'finished') return;
+    const end = Date.now() + 2500;
+    const colors = ['#FF2E88', '#FFD60A', '#00E08A', '#19D3FF'];
+    const frame = () => {
+      confetti({ particleCount: 4, angle: 60, spread: 55, origin: { x: 0 }, colors });
+      confetti({ particleCount: 4, angle: 120, spread: 55, origin: { x: 1 }, colors });
+      if (Date.now() < end) requestAnimationFrame(frame);
+    };
+    frame();
   }, [room?.status]);
 
-  if (!connected || !roomsReady || !playersReady) {
-    return (
-      <div className="min-h-screen flex flex-col items-center justify-center p-4">
-        <div className="glass-panel text-center py-8 px-12">
-          <div className="inline-block w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mb-4"></div>
-          <p className="text-gray-300 text-lg">Connecting Host Console...</p>
-        </div>
-      </div>
-    );
+  // ── Host-driven scoring (reactive; the SERVER reveals) ────────────────────────
+  // The host is the single coordinator. While the round is in 'scoring' it scores
+  // EVERY drawing (bounded-parallel Gemini calls, with a speed-only fallback) and
+  // records each via record_score_for. It does NOT reveal — the server flips to
+  // 'reveal' atomically once the last drawing is scored, so nothing can race ahead
+  // of a score and the finalize_round backstop can never be defeated by an early
+  // reveal. The loop reads LIVE table data every iteration (via refs), so late
+  // submissions, host refreshes, and slow-to-replicate rows are always picked up
+  // instead of being missed by a one-time snapshot. The backstop only matters now
+  // if the host browser dies mid-scoring.
+  const drawingsRef = useRef(drawings);
+  drawingsRef.current = drawings;
+  const currentRoundRef = useRef(currentRound);
+  currentRoundRef.current = currentRound;
+  const guessesRef = useRef(guesses);
+  guessesRef.current = guesses;
+
+  const scoringRoundRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (room?.status !== 'scoring' || !currentRound) return;
+    const roundKey = currentRound.roundId.toString();
+    if (scoringRoundRef.current === roundKey) return; // a loop is already running for this round
+    scoringRoundRef.current = roundKey;
+
+    let cancelled = false;
+    const dispatched = new Set<string>(); // drawingIds already handed to the scorer
+
+    // Score one drawing: AI with retry/backoff on a non-ok (rate-limited) result,
+    // falling back to a speed-only score so a player is NEVER left unscored.
+    const scoreOne = async (d: Drawing, word: string): Promise<{ score: number; guess: string; roast: string }> => {
+      if (!d.imageUrl) return { score: 0, guess: '', roast: 'The AI never got a drawing to judge.' };
+      for (let attempt = 0; attempt < 3 && !cancelled; attempt++) {
+        if (attempt > 0) await sleep(800 * attempt);
+        try {
+          const b64 = await urlToBase64(d.imageUrl);
+          const json = await scoreDrawing({ imageBase64: b64, word });
+          const parsed = JSON.parse(json as string) as { ok?: boolean; score?: number; guess?: string; roast?: string };
+          if (parsed.ok) return { score: parsed.score ?? 0, guess: parsed.guess ?? '', roast: parsed.roast ?? '' };
+        } catch (e) {
+          console.warn('[host scoring] attempt failed', e);
+        }
+      }
+      return { score: 0, guess: '', roast: "The AI couldn't make sense of it. That's on you." };
+    };
+
+    (async () => {
+      // Self-grade window: the round's ends_at was set to ~10s out when it entered
+      // scoring. Hold AI scoring until it elapses so every player (esp. the last to
+      // submit) can lock their guess — BUT cut it short the moment every submitter has
+      // locked in (no point waiting the rest). Synced via the server clock.
+      while (!cancelled) {
+        const r = currentRoundRef.current;
+        if (!r || r.roundId.toString() !== roundKey) return;
+        if (Number(r.endsAt.microsSinceUnixEpoch / 1000n) - Date.now() <= 0) break;
+        const submitters = drawingsRef.current.filter(d => d.roundId.toString() === roundKey && d.submitted);
+        const gs = guessesRef.current;
+        const allLocked = submitters.length > 0 &&
+          submitters.every(d => gs.some(g => g.playerId === d.playerId && g.roundId.toString() === roundKey));
+        if (allLocked) { closeGrading({ roundId: r.roundId }); break; }
+        await sleep(300);
+      }
+      if (cancelled) return;
+
+      let waits = 0;
+      const MAX_WAITS = 150; // ~60s safety cap; the server backstop covers true host death
+      while (!cancelled) {
+        const live = drawingsRef.current;
+        const round = currentRoundRef.current;
+        if (!round || round.roundId.toString() !== roundKey) return; // round advanced / unmounted
+
+        const pending = selectPending(live, roundKey, dispatched);
+        if (pending.length === 0) {
+          // Nothing new to score. Either the whole round is scored (server has, or is
+          // about to, reveal — we're done) or our in-flight records / the drawing
+          // subscription haven't caught up yet, so wait and re-check live data.
+          if (roundFullyScored(live, roundKey)) return;
+          if (++waits > MAX_WAITS) return;
+          await sleep(400);
+          continue;
+        }
+
+        for (const d of pending) dispatched.add(d.drawingId.toString());
+        const word = round.word;
+        await mapWithConcurrency(pending, 4, async (d) => {
+          const result = await scoreOne(d, word);
+          if (cancelled) return;
+          recordScoreFor({ roundId: round.roundId, playerId: d.playerId, score: result.score, guess: result.guess, roast: result.roast });
+        });
+        // Loop again — pick up anything that arrived or was reset while we scored.
+      }
+    })();
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [room?.status, currentRound?.roundId]);
+
+  // ── Derived data ──────────────────────────────────────────────────────────
+  const roundDrawings = drawings.filter(d => d.roundId === currentRound?.roundId);
+  const topDrawings   = [...roundDrawings].sort((a, b) => b.roundScore - a.roundScore).slice(0, 3);
+  const leaderboard   = [...players].sort((a, b) => b.totalScore - a.totalScore);
+
+  // Hall of Shame: lowest round_score drawings across all rounds
+  const allSubmitted  = drawings.filter(d => d.submitted && d.scored && d.imageUrl);
+  const hallOfShame   = [...allSubmitted].sort((a, b) => a.roundScore - b.roundScore).slice(0, 3);
+
+  const playerMap: Record<string, Player> = {};
+  players.forEach(p => { playerMap[p.playerId.toString()] = p; });
+
+  function getWordForDrawing(drawing: Drawing): string {
+    const r = rounds.find(r => r.roundId === drawing.roundId);
+    return r?.word ?? '?';
   }
+
+  // ── Render helpers ────────────────────────────────────────────────────────
+  const joinUrl = `${APP_URL}/join/${code}`;
 
   if (!room) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center p-4">
-        <div className="glass-panel text-center max-w-md">
-          <h2 className="text-2xl font-bold text-rose-400 mb-4">Room Not Found</h2>
-          <p className="text-gray-400 mb-6">The room code {roomCode} doesn't match any active game rooms.</p>
-          <button
-            onClick={() => router.push('/')}
-            className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-6 rounded-xl transition-colors"
-          >
-            Back to Home
-          </button>
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center flex flex-col items-center gap-4">
+          <div className="spinner" style={{ margin: 0 }} />
+          <p className="font-display uppercase tracking-widest text-[var(--cyan)]">Connecting to room {code}…</p>
         </div>
       </div>
     );
   }
 
-  // Determine host auth
-  const isMeHost = room.hostIdentity.toHexString() === identity?.toHexString();
-
-  const handleStartGame = () => {
-    startGameReducer({
-      totalRounds,
-      wordSource,
-      customWords: wordSource === 'custom' && customWords ? customWords : undefined,
-    });
-  };
-
-  const handleNextRound = () => {
-    nextRoundReducer();
-  };
-
-  const handleEndGame = () => {
-    endGameReducer();
-  };
-
-  return (
-    <main className="min-h-screen p-6 md:p-12 flex flex-col justify-between max-w-7xl mx-auto">
-      {/* Header Info */}
-      <header className="flex flex-col sm:flex-row justify-between items-center bg-slate-900/50 backdrop-blur border border-white/5 p-4 rounded-2xl mb-8">
-        <div className="flex items-center space-x-4">
-          <span className="text-2xl font-black tracking-wide text-white uppercase">DoodleDash</span>
-          <span className="bg-indigo-950 border border-indigo-700 text-indigo-300 font-bold px-3 py-1 rounded-lg text-sm uppercase tracking-wider">
-            Host Panel
-          </span>
+  // ── LOBBY ─────────────────────────────────────────────────────────────────
+  if (room.status === 'lobby') {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-4 sm:p-8 pt-20 sm:pt-8 relative">
+       <BrutalButton color="surface" size="sm" onClick={() => router.push('/')} className="absolute top-4 left-4 sm:top-6 sm:left-6 z-10">
+         Back
+       </BrutalButton>
+       <div className="w-full max-w-7xl grid grid-cols-1 lg:grid-cols-[360px_1fr_400px] gap-6 lg:gap-12 items-start">
+        {/* Left: QR + code */}
+        <div className="flex-none flex flex-col gap-6 items-center mx-auto w-full max-w-[360px]">
+          <BrutalCard color="yellow" shadowColor="#997B00" className="flex flex-col items-center gap-5 w-full !p-8">
+            <div className="bg-white rounded-2xl p-4 border-4 border-black">
+              <QRCodeSVG value={joinUrl} size={240} bgColor="#ffffff" fgColor="#0E0E16" marginSize={2} level="M" />
+            </div>
+            <p className="font-display font-black uppercase text-[#0E0E16] text-center text-sm tracking-wide break-all leading-snug">{joinUrl}</p>
+            <CopyButton text={joinUrl} label="Copy link" dark />
+          </BrutalCard>
+          <div className="bg-[var(--surface)] border-4 border-black rounded-[24px] p-6 text-center shadow-[10px_10px_0_0_#000] w-full overflow-hidden flex flex-col items-center">
+            <p className="text-[var(--cyan)] font-display font-bold uppercase tracking-widest text-base mb-2">Room Code</p>
+            <p className="font-display font-black tracking-tight text-white text-6xl leading-none whitespace-nowrap">{code}</p>
+            <div className="mt-3"><CopyButton text={code} label="Copy code" /></div>
+          </div>
         </div>
-        <div className="flex items-center space-x-6 mt-4 sm:mt-0">
-          <div className="text-center sm:text-right">
-            <p className="text-xs text-gray-400 font-semibold uppercase">Room Code</p>
-            <p className="text-3xl font-black text-indigo-400 tracking-widest">{roomCode}</p>
+
+        {/* Center: Players */}
+        <div className="min-w-0 flex flex-col gap-5 sm:gap-8 pt-2">
+          <h2 className="font-display font-black uppercase tracking-widest text-4xl sm:text-5xl lg:text-6xl text-white">
+            Players <span className="text-[var(--magenta)]">({players.length})</span>
+          </h2>
+          <div className="flex flex-wrap gap-3 sm:gap-5 content-start">
+            {players.map((p, i) => (
+              <motion.div
+                key={p.playerId.toString()}
+                initial={{ scale: 0, rotate: -10 }}
+                animate={{ scale: 1, rotate: 0 }}
+                transition={{ type: 'spring', bounce: 0.55, delay: i * 0.06 }}
+                className="flex items-center gap-3 sm:gap-4 rounded-full border-4 border-black px-5 py-3 sm:px-8 sm:py-4 font-display font-black uppercase text-xl sm:text-3xl text-[#0E0E16] shadow-[5px_5px_0_0_#000]"
+                style={{ background: p.avatarColor }}
+              >
+                <span>{p.nickname}</span>
+                {p.isHost && <span className="text-xs sm:text-sm bg-black/25 rounded-full px-2.5 py-0.5 sm:px-3 sm:py-1">host</span>}
+                {!p.isHost && (
+                  <button
+                    onClick={() => kickPlayer({ targetPlayerId: p.playerId })}
+                    className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-black/25 hover:bg-black/45 transition-colors flex items-center justify-center text-sm sm:text-base font-black leading-none"
+                    aria-label="Kick player"
+                  >
+                    X
+                  </button>
+                )}
+              </motion.div>
+            ))}
+            {players.length === 0 && <p className="font-display uppercase tracking-wide text-white/50 text-lg sm:text-2xl">Waiting for players to join…</p>}
           </div>
-          {room.status !== 'lobby' && room.status !== 'finished' && (
-            <div className="text-center sm:text-right">
-              <p className="text-xs text-gray-400 font-semibold uppercase">Round</p>
-              <p className="text-2xl font-black text-white">{room.currentRound} / {room.totalRounds}</p>
-            </div>
-          )}
         </div>
-      </header>
 
-      {/* Primary Console Layout */}
-      <div className="flex-grow flex flex-col lg:flex-row gap-8 items-stretch mb-8">
-        {/* LOBBY VIEW */}
-        {room.status === 'lobby' && (
-          <>
-            {/* Left side: QR joiner and Settings */}
-            <div className="flex-1 glass-panel flex flex-col justify-between">
-              <div>
-                <h2 className="text-2xl font-bold mb-6 text-white border-b border-white/5 pb-3">Lobby Configuration</h2>
-                
-                {isMeHost ? (
-                  <div className="space-y-6">
-                    {/* Rounds Selector */}
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-400 mb-2">
-                        Total Rounds: <span className="text-indigo-400 font-bold">{totalRounds}</span>
-                      </label>
-                      <input
-                        type="range"
-                        min={1}
-                        max={5}
-                        value={totalRounds}
-                        onChange={(e) => setTotalRounds(Number(e.target.value))}
-                        className="w-full h-2 bg-slate-950 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                      />
-                    </div>
-
-                    {/* Word source Selector */}
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-400 mb-2">Word Bank</label>
-                      <div className="flex bg-slate-950/40 p-1 rounded-xl">
-                        <button
-                          onClick={() => setWordSource('preset')}
-                          className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                            wordSource === 'preset' ? 'bg-indigo-600 text-white' : 'text-gray-400'
-                          }`}
-                        >
-                          Preset list (50 words)
-                        </button>
-                        <button
-                          onClick={() => setWordSource('custom')}
-                          className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                            wordSource === 'custom' ? 'bg-indigo-600 text-white' : 'text-gray-400'
-                          }`}
-                        >
-                          Custom Word List
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Custom word list input */}
-                    {wordSource === 'custom' && (
-                      <div>
-                        <label className="block text-sm font-semibold text-gray-400 mb-1.5">
-                          Custom Words (comma separated)
-                        </label>
-                        <textarea
-                          placeholder="cat, ice cream, rocket ship, pizza, cactus..."
-                          value={customWords}
-                          onChange={(e) => setCustomWords(e.target.value)}
-                          className="w-full h-24 bg-slate-950/50 border border-white/10 rounded-xl p-3 text-sm text-white focus:outline-none focus:border-indigo-500 transition-colors"
-                          style={{ backgroundColor: 'var(--bg-input)' }}
-                        />
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <p className="text-gray-400">Waiting for Host to configure and start the game...</p>
-                )}
-              </div>
-
-              {/* Start game Trigger */}
-              {isMeHost && (
-                <div className="mt-8 pt-4 border-t border-white/5">
-                  <button
-                    onClick={handleStartGame}
-                    disabled={roomPlayers.length === 0}
-                    className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-4 px-6 rounded-xl transition-all shadow-lg shadow-indigo-600/20 disabled:opacity-50"
-                  >
-                    Start Game ({roomPlayers.length} Player{roomPlayers.length !== 1 ? 's' : ''})
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {/* Right side: Player list and QR code */}
-            <div className="lg:w-[380px] flex flex-col gap-6">
-              {/* QR Join box */}
-              <div className="glass-panel text-center flex flex-col items-center justify-center py-6">
-                <p className="text-sm text-gray-400 font-bold uppercase tracking-wide mb-4">Scan to Join</p>
-                <div className="bg-white p-3 rounded-2xl inline-block mb-3">
-                  <img src={qrUrl} alt="Join QR Code" className="w-[180px] h-[180px]" />
-                </div>
-                <p className="text-xs text-indigo-400 font-semibold select-all truncate max-w-full px-4">{joinUrl}</p>
-              </div>
-
-              {/* Player List */}
-              <div className="glass-panel flex-grow">
-                <h3 className="text-lg font-bold mb-4 text-white">Joined Players ({roomPlayers.length})</h3>
-                <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
-                  {roomPlayers.length === 0 ? (
-                    <p className="text-gray-500 text-sm italic py-4">Waiting for players to connect...</p>
-                  ) : (
-                    roomPlayers.map((p) => (
-                      <div key={p.playerId.toString()} className="flex items-center justify-between bg-slate-950/30 border border-white/5 p-3 rounded-xl">
-                        <div className="flex items-center space-x-3">
-                          <span className="w-3.5 h-3.5 rounded-full" style={{ backgroundColor: p.avatarColor }} />
-                          <span className="font-semibold text-white">{p.nickname}</span>
-                          {p.isHost && <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1.5 py-0.5 rounded font-black">HOST</span>}
-                          {!p.connected && <span className="text-[10px] text-gray-500 italic">disconnected</span>}
-                        </div>
-                        {isMeHost && !p.isHost && (
-                          <button
-                            onClick={() => kickPlayerReducer({ targetPlayerId: p.playerId })}
-                            className="text-rose-400 hover:text-rose-300 text-xs font-bold"
-                          >
-                            Kick
-                          </button>
-                        )}
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-            </div>
-          </>
-        )}
-
-        {/* IN ROUND VIEW */}
-        {room.status === 'in_round' && currentRound && (
-          <div className="flex-grow flex flex-col gap-6 lg:flex-row">
-            {/* Round info card */}
-            <div className="flex-1 glass-panel flex flex-col justify-between py-12 px-8 text-center items-center">
-              <div>
-                <p className="text-indigo-400 text-sm font-extrabold uppercase tracking-widest mb-2">The word to draw is</p>
-                <h2 className="text-6xl font-black text-white tracking-wide uppercase mb-8">{currentRound.word}</h2>
-                
-                {/* Large countdown timer */}
-                <div className="relative inline-flex items-center justify-center">
-                  <svg className="w-48 h-48 transform -rotate-90">
-                    <circle
-                      cx="96"
-                      cy="96"
-                      r="84"
-                      stroke="rgba(255,255,255,0.05)"
-                      strokeWidth="12"
-                      fill="transparent"
-                    />
-                    <circle
-                      cx="96"
-                      cy="96"
-                      r="84"
-                      stroke={timeLeft > 10 ? 'var(--primary)' : 'var(--danger)'}
-                      strokeWidth="12"
-                      fill="transparent"
-                      strokeDasharray="527"
-                      strokeDashoffset={527 - (527 * timeLeft) / 30}
-                      className="transition-all duration-300"
-                    />
-                  </svg>
-                  <span className="absolute text-5xl font-black text-white">{timeLeft}s</span>
-                </div>
-              </div>
-              <p className="text-gray-400 text-sm mt-8">Check your phone/controller screen to draw. Submit before timer ends!</p>
-            </div>
-
-            {/* Submissions checklist */}
-            <div className="lg:w-[380px] glass-panel flex flex-col justify-between">
-              <div>
-                <h3 className="text-lg font-bold mb-4 text-white pb-2 border-b border-white/5">Submissions</h3>
-                <div className="space-y-3">
-                  {roomPlayers.map((p) => {
-                    const drawingSubmitted = currentDrawings.some(d => d.playerId === p.playerId && d.submitted);
-                    return (
-                      <div key={p.playerId.toString()} className="flex items-center justify-between bg-slate-900/40 p-3 rounded-xl border border-white/5">
-                        <div className="flex items-center space-x-3">
-                          <span className="w-3.5 h-3.5 rounded-full" style={{ backgroundColor: p.avatarColor }} />
-                          <span className="font-semibold text-gray-200">{p.nickname}</span>
-                        </div>
-                        {drawingSubmitted ? (
-                          <span className="text-xs bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2 py-1 rounded-lg font-bold">✓ Submitted</span>
-                        ) : (
-                          <span className="text-xs bg-slate-950/50 text-gray-500 px-2 py-1 rounded-lg italic">Drawing...</span>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* SCORING / JUDGING VIEW */}
-        {room.status === 'scoring' && (
-          <div className="flex-grow glass-panel flex flex-col items-center justify-center text-center py-16">
-            <div className="inline-block w-16 h-16 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mb-6"></div>
-            <h2 className="text-3xl font-black mb-4">Gemini AI is judging drawings...</h2>
-            <p className="text-gray-400 max-w-md mb-8">
-              Calculating recognizability scores, making visual guesses, and preparing roasts.
-            </p>
-            
-            {/* Progress Bar */}
-            <div className="w-full max-w-md bg-slate-950/60 rounded-full h-3 mb-2 border border-white/5 overflow-hidden">
-              <div 
-                className="bg-indigo-500 h-full transition-all duration-300"
-                style={{ 
-                  width: `${roomPlayers.length > 0 ? (currentDrawings.filter(d => d.scored).length / roomPlayers.length) * 100 : 0}%` 
-                }}
-              />
-            </div>
-            <p className="text-sm font-semibold text-indigo-400">
-              Scored {currentDrawings.filter(d => d.scored).length} of {roomPlayers.length} drawings
-            </p>
-          </div>
-        )}
-
-        {/* REVEAL / SCOREBOARD VIEW */}
-        {room.status === 'reveal' && currentRound && (
-          <div className="flex-grow flex flex-col gap-6 lg:flex-row">
-            {/* Drawing reveals */}
-            <div className="flex-grow glass-panel flex flex-col justify-between">
-              <div>
-                <h3 className="text-lg font-bold mb-4 text-white pb-2 border-b border-white/5">
-                  Reveal: Drawing {revealIndex + 1} of {currentDrawings.length}
-                </h3>
-
-                {currentDrawings.length > 0 ? (
-                  (() => {
-                    const activeDrawing = currentDrawings[revealIndex];
-                    if (!activeDrawing) return null;
-                    const artist = roomPlayers.find(p => p.playerId === activeDrawing.playerId);
-                    
-                    return (
-                      <div className="flex flex-col md:flex-row gap-8 items-center md:items-stretch py-4">
-                        {/* Canvas Image */}
-                        <div className="w-full md:w-1/2 aspect-square bg-white border border-white/10 rounded-2xl overflow-hidden flex items-center justify-center p-2 relative shadow-2xl">
-                          {activeDrawing.imageUrl ? (
-                            <img src={activeDrawing.imageUrl} alt="Submitted Canvas" className="max-w-full max-h-full object-contain" />
-                          ) : (
-                            <div className="text-gray-400 italic font-bold">No Drawing Submitted</div>
-                          )}
-                          <div className="absolute bottom-4 left-4 bg-slate-950/80 backdrop-blur border border-white/10 text-white font-extrabold px-4 py-2 rounded-xl text-sm flex items-center space-x-2">
-                            <span className="w-3 h-3 rounded-full" style={{ backgroundColor: artist?.avatarColor }} />
-                            <span>{artist?.nickname}</span>
-                          </div>
-                        </div>
-
-                        {/* Gemini scores, guesses, roasts */}
-                        <div className="w-full md:w-1/2 flex flex-col justify-between space-y-6">
-                          <div>
-                            <p className="text-xs text-gray-400 font-bold uppercase tracking-wider mb-1">AI Guess</p>
-                            <h4 className="text-3xl font-black text-indigo-400 uppercase tracking-wide mb-4">
-                              {activeDrawing.aiGuess ? `"${activeDrawing.aiGuess}"` : "¯\\_(ツ)_/¯"}
-                            </h4>
-
-                            <div className="bg-indigo-950/20 border border-indigo-900/30 p-4 rounded-xl mb-4">
-                              <p className="text-xs text-indigo-300 font-bold uppercase tracking-wider mb-1">AI Critique & Roast</p>
-                              <p className="text-gray-300 italic">"{activeDrawing.aiRoast}"</p>
-                            </div>
-                          </div>
-
-                          <div className="grid grid-cols-3 gap-3 bg-slate-950/40 p-4 rounded-xl border border-white/5 text-center">
-                            <div>
-                              <p className="text-[10px] text-gray-400 font-bold uppercase">AI Accuracy</p>
-                              <p className="text-2xl font-black text-white">{activeDrawing.aiScore >= 0 ? activeDrawing.aiScore : 0}</p>
-                            </div>
-                            <div>
-                              <p className="text-[10px] text-gray-400 font-bold uppercase">Speed Bonus</p>
-                              <p className="text-2xl font-black text-white">+{activeDrawing.secondsLeft}</p>
-                            </div>
-                            <div>
-                              <p className="text-[10px] text-gray-400 font-bold uppercase">Round Score</p>
-                              <p className="text-2xl font-black text-indigo-400">{activeDrawing.roundScore}</p>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })()
-                ) : (
-                  <p className="text-gray-400">No drawings available for this round.</p>
-                )}
-              </div>
-
-              {/* Reveal controls */}
-              <div className="flex space-x-4 mt-6 pt-4 border-t border-white/5">
-                <button
-                  onClick={() => setRevealIndex(prev => Math.max(0, prev - 1))}
-                  disabled={revealIndex === 0}
-                  className="flex-1 bg-slate-950/60 hover:bg-slate-900 border border-white/10 text-white font-bold py-2.5 px-4 rounded-xl transition-all disabled:opacity-40"
-                >
-                  Previous Drawing
-                </button>
-                {revealIndex < currentDrawings.length - 1 ? (
-                  <button
-                    onClick={() => setRevealIndex(prev => prev + 1)}
-                    className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 px-4 rounded-xl transition-all"
-                  >
-                    Next Drawing
-                  </button>
-                ) : isMeHost ? (
-                  <button
-                    onClick={handleNextRound}
-                    className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 px-4 rounded-xl transition-all"
-                  >
-                    {room.currentRound < room.totalRounds ? "Next Round" : "See Final Standings"}
-                  </button>
-                ) : (
-                  <div className="flex-1 text-center text-sm font-semibold text-gray-400 py-2.5">
-                    Waiting for Host to advance...
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Persistent Leaderboard */}
-            <div className="lg:w-[340px] glass-panel">
-              <h3 className="text-lg font-bold mb-4 text-white pb-2 border-b border-white/5">Standings</h3>
-              <div className="space-y-2">
-                {roomPlayers.map((p, idx) => (
-                  <div key={p.playerId.toString()} className="flex items-center justify-between bg-slate-900/40 p-2.5 rounded-xl border border-white/5">
-                    <div className="flex items-center space-x-3">
-                      <span className="text-xs font-black text-gray-500 w-4">{idx + 1}.</span>
-                      <span className="w-3 h-3 rounded-full" style={{ backgroundColor: p.avatarColor }} />
-                      <span className="font-semibold text-sm text-gray-200">{p.nickname}</span>
-                    </div>
-                    <span className="font-black text-sm text-white">{p.totalScore} pts</span>
-                  </div>
+        {/* Right: Config */}
+        <div className="flex-none w-full lg:w-[400px] flex flex-col gap-5">
+          <h2 className="font-display font-black uppercase tracking-widest text-3xl sm:text-4xl text-white">Game Setup</h2>
+          <BrutalCard color="surface" className="flex flex-col gap-5 !p-7">
+            <div>
+              <label className="block text-base font-display uppercase tracking-wide text-white/60 mb-2.5">Rounds</label>
+              <div className="flex gap-3">
+                {[3, 5, 8].map(n => (
+                  <BrutalButton key={n} size="md" color={totalRounds === n ? 'cyan' : 'surface'} onClick={() => setTotalRounds(n)} className="flex-1">
+                    {n}
+                  </BrutalButton>
                 ))}
               </div>
             </div>
-          </div>
-        )}
+            <div>
+              <label className="block text-base font-display uppercase tracking-wide text-white/60 mb-2.5">Draw time</label>
+              <div className="flex flex-wrap gap-3">
+                {[30, 60, 90, 120].map(s => (
+                  <BrutalButton key={s} size="md" color={roundDuration === s ? 'cyan' : 'surface'} onClick={() => setRoundDuration(s)} className="flex-1 min-w-[60px] !px-3">
+                    {s}s
+                  </BrutalButton>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="block text-base font-display uppercase tracking-wide text-white/60 mb-2.5">Words</label>
+              <div className="flex gap-3">
+                {(['preset', 'custom'] as const).map(s => (
+                  <BrutalButton key={s} size="md" color={wordSource === s ? 'cyan' : 'surface'} onClick={() => setWordSource(s)} className="flex-1 capitalize">
+                    {s}
+                  </BrutalButton>
+                ))}
+              </div>
+            </div>
+            {wordSource === 'custom' && (
+              <textarea
+                placeholder="One word per line or comma-separated"
+                value={customWords}
+                onChange={e => setCustomWords(e.target.value)}
+                rows={4}
+                className="w-full border-4 border-black bg-[var(--surface)] rounded-2xl p-3 text-sm font-display text-white shadow-[4px_4px_0_0_#000] resize-y focus:outline-none focus:border-[var(--magenta)]"
+              />
+            )}
+            <BrutalButton
+              color="magenta"
+              size="lg"
+              disabled={players.length < 2}
+              onClick={() => room && startGame({ roomId: room.roomId, totalRounds, wordSource, customWords, roundDuration })}
+              className="w-full whitespace-normal leading-tight text-center !py-5 mt-1"
+            >
+              {players.length < 2 ? `Need ${2 - players.length} more player…` : '▶ Start Game'}
+            </BrutalButton>
+          </BrutalCard>
+        </div>
+       </div>
+      </div>
+    );
+  }
 
-        {/* GAME OVER VIEW / FINISHED */}
-        {room.status === 'finished' && (
-          <div className="flex-grow flex flex-col gap-8">
-            {/* Podium Standings */}
-            <div className="glass-panel py-8 px-6 text-center">
-              <h2 className="text-3xl font-black text-white mb-8">Final Results Podium</h2>
-              
-              <div className="flex justify-center items-end space-x-4 max-w-lg mx-auto h-48 mb-8">
-                {/* 2nd Place */}
-                {roomPlayers[1] && (
-                  <div className="flex flex-col items-center flex-1">
-                    <span className="w-4.5 h-4.5 rounded-full mb-1" style={{ backgroundColor: roomPlayers[1].avatarColor }} />
-                    <span className="font-bold text-gray-300 text-sm truncate max-w-[100px]">{roomPlayers[1].nickname}</span>
-                    <span className="text-xs text-gray-400 mb-2">{roomPlayers[1].totalScore} pts</span>
-                    <div className="w-full bg-slate-800/80 border border-white/10 rounded-t-xl h-24 flex items-center justify-center font-black text-2xl text-gray-400">2nd</div>
-                  </div>
-                )}
-                
-                {/* 1st Place */}
-                {roomPlayers[0] && (
-                  <div className="flex flex-col items-center flex-1">
-                    <div className="text-2xl mb-1 float">👑</div>
-                    <span className="w-5 h-5 rounded-full mb-1" style={{ backgroundColor: roomPlayers[0].avatarColor }} />
-                    <span className="font-black text-white text-base truncate max-w-[120px]">{roomPlayers[0].nickname}</span>
-                    <span className="text-xs text-indigo-400 font-bold mb-2">{roomPlayers[0].totalScore} pts</span>
-                    <div className="w-full bg-indigo-950/70 border border-indigo-700/30 rounded-t-2xl h-36 flex items-center justify-center font-black text-3xl text-indigo-300">1st</div>
-                  </div>
-                )}
-                
-                {/* 3rd Place */}
-                {roomPlayers[2] && (
-                  <div className="flex flex-col items-center flex-1">
-                    <span className="w-4 h-4 rounded-full mb-1" style={{ backgroundColor: roomPlayers[2].avatarColor }} />
-                    <span className="font-bold text-gray-300 text-sm truncate max-w-[100px]">{roomPlayers[2].nickname}</span>
-                    <span className="text-xs text-gray-400 mb-2">{roomPlayers[2].totalScore} pts</span>
-                    <div className="w-full bg-slate-900/80 border border-white/10 rounded-t-xl h-18 flex items-center justify-center font-black text-xl text-amber-700">3rd</div>
-                  </div>
+  // ── IN ROUND ──────────────────────────────────────────────────────────────
+  if (room.status === 'in_round' && currentRound) {
+    const submittedSet = new Set(roundDrawings.filter(d => d.submitted).map(d => d.playerId.toString()));
+    const countColor = secondsLeft <= 5 ? 'text-[var(--red)]' : secondsLeft <= 10 ? 'text-[var(--yellow)]' : 'text-white';
+    const doneCount = submittedSet.size;
+
+    // Peek viewer — show the submitted drawing if done, else replay their live strokes.
+    const peekDrawing = peekPlayer ? roundDrawings.find(d => d.playerId === peekPlayer.playerId && d.submitted) : null;
+    const peekStatusLabel = peekDrawing ? 'Submitted' : peekPlayerHasStrokes ? 'Drawing live…' : 'Warming up…';
+
+    const playerChips = (
+      <div className="flex flex-wrap gap-2 sm:gap-3 justify-center max-w-[640px]">
+        {players.map(p => {
+          const done = submittedSet.has(p.playerId.toString());
+          return (
+            <BrutalCard
+              key={p.playerId.toString()}
+              color={done ? 'green' : 'surface'}
+              shadowColor={done ? '#00663E' : '#000000'}
+              className="!p-1.5 !px-3 sm:!p-2 sm:!px-4 !rounded-full flex items-center gap-2"
+              animate={{ scale: done ? [1, 1.12, 1] : 1 }}
+              transition={{ duration: 0.3 }}
+            >
+              <div className="w-2.5 h-2.5 sm:w-3 sm:h-3 rounded-full border border-black" style={{ background: p.avatarColor }} />
+              <span className={`font-display font-bold text-xs sm:text-sm ${done ? 'text-[#0E0E16]' : 'text-white'}`}>{p.nickname}</span>
+              {done && <span className="text-[#0E0E16] font-black text-[10px] sm:text-xs uppercase tracking-wide">Done</span>}
+            </BrutalCard>
+          );
+        })}
+      </div>
+    );
+
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center gap-5 sm:gap-8 p-4 sm:p-8">
+        <div className="text-center">
+          <p className="font-display uppercase tracking-widest text-[var(--cyan)] mb-1 sm:mb-2 text-sm sm:text-base">Round {room.currentRound} / {room.totalRounds}</p>
+          <h1 className="font-display font-black uppercase tracking-[0.05em] text-white leading-none" style={{ fontSize: 'clamp(2rem, 8vw, 5rem)' }}>
+            {currentRound.word}
+          </h1>
+        </div>
+
+        {!spectateActive ? (
+          <>
+            <div className={`font-display font-black leading-none transition-colors ${countColor}`} style={{ fontSize: 'clamp(3.5rem, 12vw, 8rem)' }}>
+              {secondsLeft}
+            </div>
+            {playerChips}
+            <BrutalButton color="cyan" size="lg" onClick={() => room && setSpectate({ roomId: room.roomId, active: true })}>
+              Peek at drawings
+            </BrutalButton>
+          </>
+        ) : (
+          <div className="w-full max-w-[480px] flex flex-col items-center gap-4">
+            <div className="flex items-center justify-center gap-4">
+              <span className="font-display uppercase tracking-widest text-[var(--cyan)] text-sm">{doneCount}/{players.length} done</span>
+              <span className={`font-display font-black tabular-nums ${countColor}`} style={{ fontSize: 'clamp(2rem, 7vw, 3rem)' }}>{secondsLeft}s</span>
+            </div>
+            <div className="flex items-center justify-between w-full gap-3">
+              <BrutalButton size="sm" color="surface" onClick={() => setPeekIdx(i => i - 1)}>Prev</BrutalButton>
+              <div className="flex items-center gap-2 min-w-0">
+                {peekPlayer && <div className="w-4 h-4 rounded-full border-2 border-black flex-none" style={{ background: peekPlayer.avatarColor }} />}
+                <span className="font-display font-black uppercase text-white truncate text-lg sm:text-xl">{peekPlayer?.nickname ?? '—'}</span>
+              </div>
+              <BrutalButton size="sm" color="surface" onClick={() => setPeekIdx(i => i + 1)}>Next</BrutalButton>
+            </div>
+            <BrutalCard color={peekDrawing ? 'green' : 'surface'} className="!p-3 w-full flex flex-col gap-2">
+              <div className="aspect-[3/4] w-full bg-white rounded-xl border-4 border-black overflow-hidden flex items-center justify-center relative">
+                {peekDrawing?.imageUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={peekDrawing.imageUrl} alt="" className="w-full h-full object-contain" />
+                ) : (
+                  <>
+                    <canvas ref={peekCanvasRef} width={600} height={800} className="w-full h-full" style={{ display: 'block' }} />
+                    {!peekPlayerHasStrokes && (
+                      <span className="absolute font-display uppercase tracking-wide text-black/30">Warming up…</span>
+                    )}
+                  </>
                 )}
               </div>
-
-              {/* Remaining standings */}
-              {roomPlayers.length > 3 && (
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 max-w-3xl mx-auto">
-                  {roomPlayers.slice(3).map((p, idx) => (
-                    <div key={p.playerId.toString()} className="bg-slate-950/30 border border-white/5 p-2 rounded-xl flex items-center justify-between text-left">
-                      <div className="flex items-center space-x-2">
-                        <span className="text-xs text-gray-500 font-bold">{idx + 4}.</span>
-                        <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: p.avatarColor }} />
-                        <span className="text-xs font-semibold text-gray-300 truncate max-w-[80px]">{p.nickname}</span>
-                      </div>
-                      <span className="text-xs font-bold text-white">{p.totalScore} pts</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Hall of Shame */}
-            <div className="glass-panel">
-              <h3 className="text-2xl font-black text-rose-400 mb-6 border-b border-white/5 pb-3">AI Hall of Shame 💀</h3>
-              
-              {/* Grab up to 3 lowest scored drawings */}
-              {(() => {
-                const shameDrawings = drawings
-                  .filter(d => d.roomId === room.roomId && d.scored && d.imageUrl) // Must be scored and have a visual
-                  .sort((a, b) => a.aiScore - b.aiScore) // lowest score first
-                  .slice(0, 3);
-                
-                if (shameDrawings.length === 0) {
-                  return <p className="text-gray-500 italic text-center py-4">No scored drawings to display.</p>;
-                }
-
+              <p className={`font-display font-black uppercase tracking-wide text-center text-sm ${peekDrawing ? 'text-[#0E0E16]' : 'text-[var(--cyan)]'}`}>{peekStatusLabel}</p>
+            </BrutalCard>
+            <div className="flex flex-wrap gap-2 justify-center w-full">
+              {players.map((p, i) => {
+                const done = submittedSet.has(p.playerId.toString());
                 return (
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                    {shameDrawings.map((dw, idx) => {
-                      const artist = roomPlayers.find(p => p.playerId === dw.playerId);
-                      return (
-                        <div key={dw.drawingId.toString()} className="bg-slate-950/40 border border-rose-950/40 p-4 rounded-2xl flex flex-col justify-between">
-                          <div className="text-center mb-3">
-                            <span className="text-xs bg-rose-500/10 border border-rose-500/20 text-rose-400 font-bold px-2 py-0.5 rounded-lg uppercase">
-                              Shame #{idx + 1} (Score: {dw.aiScore})
-                            </span>
-                          </div>
-                          
-                          <div className="aspect-square bg-white rounded-xl overflow-hidden flex items-center justify-center p-2 mb-4">
-                            <img src={dw.imageUrl} alt="Shame drawing" className="max-w-full max-h-full object-contain" />
-                          </div>
-                          
-                          <div className="space-y-2">
-                            <p className="text-xs font-bold text-gray-400 flex items-center justify-center space-x-2">
-                              <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: artist?.avatarColor }} />
-                              <span>By {artist?.nickname}</span>
-                            </p>
-                            <p className="text-sm italic text-rose-300 text-center bg-rose-950/20 p-3 rounded-xl">
-                              "{dw.aiRoast}"
-                            </p>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
+                  <button key={p.playerId.toString()} onClick={() => setPeekIdx(i)}
+                    className={`w-4 h-4 rounded-full border-2 transition-transform ${i === peekSafeIdx ? 'border-white scale-125' : 'border-black'} ${done ? 'ring-2 ring-[var(--green)]' : ''}`}
+                    style={{ background: p.avatarColor }} aria-label={p.nickname} />
                 );
-              })()}
+              })}
             </div>
+            <BrutalButton color="magenta" size="md" onClick={() => room && setSpectate({ roomId: room.roomId, active: false })}>
+              Stop peeking
+            </BrutalButton>
           </div>
         )}
       </div>
+    );
+  }
 
-      {/* Footer / Controls */}
-      <footer className="text-center text-xs text-gray-500 border-t border-white/5 pt-4">
-        {room.status === 'finished' && isMeHost && (
-          <button
-            onClick={() => router.push('/')}
-            className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-8 rounded-xl transition-all shadow-lg shadow-indigo-600/20 mb-4 inline-block"
+  // ── SCORING ───────────────────────────────────────────────────────────────
+  if (room.status === 'scoring') {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center gap-6 p-8">
+        <BrutalCard
+          color="cyan"
+          shadowColor="#007594"
+          className="flex flex-col items-center gap-4 text-center"
+          animate={{ rotate: [-1.5, 1.5, -1.5] }}
+          transition={{ repeat: Infinity, duration: 1.2, ease: 'easeInOut' }}
+        >
+          <BouncyDots />
+          {gradeSecsLeft > 0 ? (
+            <>
+              <h2 className="font-display font-black uppercase tracking-widest text-3xl text-[#0E0E16]">Lock in your guesses!</h2>
+              <p className="font-display font-black text-6xl text-[#0E0E16] tabular-nums">{gradeSecsLeft}s</p>
+              <p className="font-display font-bold text-[#0E0E16]/70">Players are guessing their own scores for a bonus…</p>
+            </>
+          ) : (
+            <>
+              <h2 className="font-display font-black uppercase tracking-widest text-3xl text-[#0E0E16]">The AI is judging…</h2>
+              <p className="font-display font-bold text-[#0E0E16]/70">{roundDrawings.filter(d => d.submitted && d.aiScore < 0).length} drawings still being scored</p>
+            </>
+          )}
+        </BrutalCard>
+      </div>
+    );
+  }
+
+  // ── REVEAL ────────────────────────────────────────────────────────────────
+  if (room.status === 'reveal' && currentRound) {
+    const showTop = topDrawings; // always show all top drawings (up to 3)
+
+    return (
+      <div className="min-h-screen flex items-center justify-center p-4 sm:p-6">
+       <div className="w-full max-w-7xl flex flex-col lg:flex-row gap-5 lg:gap-8 items-stretch">
+        {/* Gallery */}
+        <BrutalCard color="surface" className="flex-1 min-w-0 flex flex-col gap-5 sm:gap-6">
+          <h2 className="font-display font-black uppercase tracking-widest text-2xl sm:text-4xl text-white">
+            Round {room.currentRound} <span className="text-[var(--cyan)]">— “{currentRound.word}”</span>
+          </h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-5">
+            {showTop.map((d, i) => {
+              const p = playerMap[d.playerId.toString()];
+              return (
+                <motion.div
+                  key={d.drawingId.toString()}
+                  className={`bg-[var(--canvas)] rounded-2xl border-4 overflow-hidden relative flex flex-col ${i === 0 ? 'border-[var(--yellow)]' : 'border-black'}`}
+                  style={{ boxShadow: `6px 6px 0px 0px ${i === 0 ? '#997B00' : '#000000'}` }}
+                  initial={{ opacity: 0, y: 30, scale: 0.92 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  transition={{ type: 'spring', stiffness: 240, damping: 18, delay: i * 0.1 }}
+                >
+                  <span className={`absolute top-3 left-3 z-10 px-3 py-0.5 rounded-full font-display font-black text-sm border-2 border-black ${i === 0 ? 'bg-[var(--yellow)] text-[#0E0E16]' : 'bg-[var(--surface)] text-white'}`}>
+                    #{i + 1}
+                  </span>
+                  {d.imageUrl ? (
+                    <img src={d.imageUrl} alt="drawing" className="w-full aspect-square object-cover bg-white" />
+                  ) : (
+                    <div className="w-full aspect-square bg-white flex items-center justify-center text-black/30 font-display uppercase">no image</div>
+                  )}
+                  <div className="p-4 flex flex-col gap-1.5 border-t-4 border-black">
+                    {p && (
+                      <div className="flex items-center gap-2">
+                        <div className="w-3.5 h-3.5 rounded-full border-2 border-black" style={{ background: p.avatarColor }} />
+                        <span className="font-display font-bold text-white uppercase">{p.nickname}</span>
+                      </div>
+                    )}
+                    <div className="font-display font-black text-3xl text-[var(--yellow)] flex items-center gap-2">
+                      <CountUp value={d.roundScore} /> pts
+                      {d.aiScore > 100 && <span className="text-base text-[var(--green)] font-black">BONUS</span>}
+                    </div>
+                    <div className="text-xs text-white/60 font-display">
+                      AI: <strong className="text-white">{d.aiScore > 100 ? d.aiScore - 100 : d.aiScore}</strong>{d.aiScore > 100 && <strong className="text-[var(--magenta)]"> +100</strong>}{' + '}Speed: <strong className="text-white">{d.roundScore - d.aiScore}</strong>
+                    </div>
+                    {d.aiGuess && <div className="text-sm font-display font-bold text-[var(--cyan)]">“{d.aiGuess}”</div>}
+                    <div className="text-sm text-white/70 italic">{d.aiRoast}</div>
+                  </div>
+                </motion.div>
+              );
+            })}
+          </div>
+        </BrutalCard>
+
+        {/* Right column: leaderboard + next */}
+        <div className="flex-none w-full lg:w-[320px] flex flex-col gap-5 sm:gap-6">
+          <BrutalCard color="yellow" shadowColor="#997B00" className="flex-1">
+            <h3 className="font-display font-black uppercase tracking-widest text-2xl sm:text-3xl text-[#0E0E16] mb-5">Leaderboard</h3>
+            <div className="flex flex-col gap-3">
+              {leaderboard.map((p, i) => (
+                <motion.div
+                  key={p.playerId.toString()}
+                  initial={{ x: 40, opacity: 0 }}
+                  animate={{ x: 0, opacity: 1 }}
+                  transition={{ type: 'spring', stiffness: 280, damping: 18, delay: i * 0.08 }}
+                  className="flex items-center gap-3 bg-white border-4 border-black rounded-xl p-3 shadow-[3px_3px_0_0_#000]"
+                >
+                  <span className="font-display font-black text-xl text-[var(--magenta)] w-8 text-center">#{i + 1}</span>
+                  <div className="w-3.5 h-3.5 rounded-full border-2 border-black" style={{ background: p.avatarColor }} />
+                  <span className="flex-1 font-display font-bold uppercase text-[#0E0E16]">{p.nickname}</span>
+                  <span className="font-display font-black text-[#0E0E16]"><CountUp value={p.totalScore} /></span>
+                </motion.div>
+              ))}
+            </div>
+          </BrutalCard>
+
+          <BrutalButton
+            color="magenta"
+            size="xl"
+            onClick={() => room && nextRound({ roomId: room.roomId })}
+            className="w-full !text-2xl !py-6"
           >
-            Create New Game
-          </button>
-        )}
-        <p>DoodleDash Host Console. Connected to SpacetimeDB 2.0.</p>
-      </footer>
+            {room.currentRound >= room.totalRounds ? 'End Game' : 'Next Round'}
+          </BrutalButton>
+        </div>
+       </div>
+      </div>
+    );
+  }
 
-      <style jsx global>{`
-        .flex { display: flex; }
-        .flex-col { flex-direction: column; }
-        .items-center { align-items: center; }
-        .justify-between { justify-content: space-between; }
-        .justify-center { justify-content: center; }
-        .text-center { text-align: center; }
-        .space-x-3 > * + * { margin-left: 0.75rem; }
-        .space-x-4 > * + * { margin-left: 1rem; }
-        .space-x-6 > * + * { margin-left: 1.5rem; }
-        .space-y-2 > * + * { margin-top: 0.5rem; }
-        .space-y-3 > * + * { margin-top: 0.75rem; }
-        .space-y-4 > * + * { margin-top: 1rem; }
-        .space-y-6 > * + * { margin-top: 1.5rem; }
-        .mt-4 { margin-top: 1rem; }
-        .mt-6 { margin-top: 1.5rem; }
-        .mt-8 { margin-top: 2rem; }
-        .mb-1 { margin-bottom: 0.25rem; }
-        .mb-2 { margin-bottom: 0.5rem; }
-        .mb-3 { margin-bottom: 0.75rem; }
-        .mb-4 { margin-bottom: 1rem; }
-        .mb-6 { margin-bottom: 1.5rem; }
-        .mb-8 { margin-bottom: 2rem; }
-        .pb-2 { padding-bottom: 0.5rem; }
-        .pb-3 { padding-bottom: 0.75rem; }
-        .pt-4 { padding-top: 1rem; }
-        .py-2.5 { padding-top: 0.625rem; padding-bottom: 0.625rem; }
-        .py-4 { padding-top: 1rem; padding-bottom: 1rem; }
-        .py-6 { padding-top: 1.5rem; padding-bottom: 1.5rem; }
-        .py-8 { padding-top: 2rem; padding-bottom: 2rem; }
-        .py-12 { padding-top: 3rem; padding-bottom: 3rem; }
-        .py-16 { padding-top: 4rem; padding-bottom: 4rem; }
-        .px-3 { padding-left: 0.75rem; padding-right: 0.75rem; }
-        .px-4 { padding-left: 1rem; padding-right: 1rem; }
-        .px-6 { padding-left: 1.5rem; padding-right: 1.5rem; }
-        .px-8 { padding-left: 2rem; padding-right: 2rem; }
-        .px-12 { padding-left: 3rem; padding-right: 3rem; }
-        .w-full { width: 100%; }
-        .w-3 { width: 0.75rem; }
-        .w-3.5 { width: 0.875rem; }
-        .w-4 { width: 1rem; }
-        .w-4.5 { width: 1.125rem; }
-        .w-5 { width: 1.25rem; }
-        .w-8 { width: 2rem; }
-        .w-12 { width: 3rem; }
-        .w-16 { width: 4rem; }
-        .w-48 { width: 12rem; }
-        .h-2 { height: 0.5rem; }
-        .h-3 { height: 0.75rem; }
-        .h-3.5 { height: 0.875rem; }
-        .h-4 { height: 1rem; }
-        .h-4.5 { height: 1.125rem; }
-        .h-5 { height: 1.25rem; }
-        .h-8 { height: 2rem; }
-        .h-12 { height: 3rem; }
-        .h-16 { height: 4rem; }
-        .h-18 { height: 4.5rem; }
-        .h-24 { height: 6rem; }
-        .h-36 { height: 9rem; }
-        .h-48 { height: 12rem; }
-        .max-w-md { max-width: 28rem; }
-        .max-w-lg { max-width: 32rem; }
-        .max-w-3xl { max-width: 48rem; }
-        .max-w-7xl { max-width: 80rem; }
-        .mx-auto { margin-left: auto; margin-right: auto; }
-        .aspect-square { aspect-ratio: 1 / 1; }
-        .flex-grow { flex-grow: 1; }
-        .flex-1 { flex: 1 1 0%; }
-        .rounded-xl { border-radius: 0.75rem; }
-        .rounded-2xl { border-radius: 1rem; }
-        .rounded-full { border-radius: 9999px; }
-        .border { border-width: 1px; }
-        .bg-indigo-600 { background-color: var(--primary); }
-        .text-3xl { font-size: 1.875rem; }
-        .text-2xl { font-size: 1.5rem; }
-        .text-6xl { font-size: 3.75rem; }
-        .text-sm { font-size: 0.875rem; }
-        .text-xs { font-size: 0.75rem; }
-        .font-bold { font-weight: 700; }
-        .font-black { font-weight: 900; }
-        .font-semibold { font-weight: 600; }
-        .font-extrabold { font-weight: 800; }
-        .tracking-wide { letter-spacing: 0.025em; }
-        .tracking-wider { letter-spacing: 0.05em; }
-        .tracking-widest { letter-spacing: 0.1em; }
-        .text-gray-200 { color: rgb(229, 231, 235); }
-        .text-gray-300 { color: rgb(209, 213, 219); }
-        .text-gray-400 { color: rgb(156, 163, 175); }
-        .text-gray-500 { color: rgb(107, 114, 128); }
-        .text-white { color: #fff; }
-        .text-indigo-300 { color: rgb(199, 210, 254); }
-        .text-indigo-400 { color: rgb(129, 140, 248); }
-        .text-rose-300 { color: rgb(252, 165, 165); }
-        .text-rose-400 { color: rgb(248, 113, 113); }
-        .uppercase { text-transform: uppercase; }
-        .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .grid { display: grid; }
-        .grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .gap-3 { gap: 0.75rem; }
-        .gap-6 { gap: 1.5rem; }
-        .gap-8 { gap: 2rem; }
-        .transition-all { transition-property: all; }
-        .duration-300 { transition-duration: 300ms; }
-        .animate-spin {
-          animation: spin 1s linear infinite;
-        }
-        @keyframes spin {
-          from { transform: rotate(0deg); }
-          to { transform: rotate(360deg); }
-        }
-      `}</style>
-    </main>
+  // ── FINISHED ──────────────────────────────────────────────────────────────
+  if (room.status === 'finished') {
+    const winner = leaderboard[0];
+    const runnersUp = leaderboard.slice(1, 3); // 2nd & 3rd for the podium
+    return (
+      <div className="min-h-screen p-4 sm:p-8 flex flex-col items-center gap-8 sm:gap-14">
+        {/* Champion */}
+        {winner && (
+          <motion.div
+            className="bg-[var(--yellow)] border-4 sm:border-8 border-black rounded-[28px] sm:rounded-[48px] shadow-[8px_8px_0_0_#000] sm:shadow-[16px_16px_0_0_#000] px-6 sm:px-12 lg:px-16 py-8 sm:py-12 flex flex-col items-center text-center max-w-3xl w-full"
+            initial={{ scale: 0, rotate: -6 }}
+            animate={{ scale: 1, rotate: 0 }}
+            transition={{ type: 'spring', bounce: 0.55 }}
+          >
+            <CrownIcon />
+            <p className="font-display font-bold uppercase tracking-[0.25em] text-[#0E0E16]/60 text-base sm:text-xl mt-3 sm:mt-4 mb-2 sm:mb-3">Champion</p>
+            <div className="flex items-center justify-center gap-3 sm:gap-4 mb-5 sm:mb-7">
+              <div className="w-7 h-7 sm:w-9 sm:h-9 rounded-full border-4 border-black flex-none" style={{ background: winner.avatarColor }} />
+              <h1 className="font-display font-black uppercase text-[#0E0E16] leading-none tracking-tight" style={{ fontSize: 'clamp(2.2rem, 8vw, 6rem)' }}>{winner.nickname}</h1>
+            </div>
+            <div className="bg-[#0E0E16] text-white font-display font-black text-3xl sm:text-5xl px-8 sm:px-12 py-4 sm:py-5 rounded-3xl border-4 border-black -rotate-3 shadow-[8px_8px_0_0_var(--magenta)]">
+              <CountUp value={winner.totalScore} /> PTS
+            </div>
+          </motion.div>
+        )}
+
+        {/* Podium: 2nd & 3rd */}
+        {runnersUp.length > 0 && (
+          <div className="flex flex-wrap justify-center gap-4 sm:gap-6 w-full max-w-3xl">
+            {runnersUp.map((p, i) => (
+              <motion.div
+                key={p.playerId.toString()}
+                className="flex-1 min-w-[150px] bg-[var(--surface)] border-4 border-black rounded-[24px] shadow-[8px_8px_0_0_#000] p-4 sm:p-6 flex items-center gap-3 sm:gap-4"
+                initial={{ y: 30, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                transition={{ type: 'spring', stiffness: 240, damping: 18, delay: 0.2 + i * 0.1 }}
+              >
+                <span className="font-display font-black text-2xl sm:text-4xl text-white/40">#{i + 2}</span>
+                <div className="w-5 h-5 sm:w-6 sm:h-6 rounded-full border-2 border-black flex-none" style={{ background: p.avatarColor }} />
+                <span className="flex-1 font-display font-black uppercase text-xl sm:text-2xl text-white truncate">{p.nickname}</span>
+                <span className="font-display font-black text-xl sm:text-2xl text-[var(--yellow)]"><CountUp value={p.totalScore} /></span>
+              </motion.div>
+            ))}
+          </div>
+        )}
+
+        {/* Final standings */}
+        <div className="max-w-[560px] mx-auto w-full">
+          <h2 className="font-display font-black uppercase tracking-widest text-3xl text-white mb-5 text-center">Final Standings</h2>
+          <div className="flex flex-col gap-3">
+            {leaderboard.map((p, i) => (
+              <motion.div
+                key={p.playerId.toString()}
+                className={`flex items-center gap-4 rounded-2xl border-4 px-5 py-4 shadow-[5px_5px_0_0_#000] ${i === 0 ? 'bg-[var(--yellow)] border-black' : 'bg-[var(--surface)] border-black'}`}
+                initial={{ opacity: 0, y: 16 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: i * 0.06 }}
+              >
+                <span className={`font-display font-black text-2xl w-10 text-center ${i === 0 ? 'text-[#0E0E16]' : 'text-white/50'}`}>#{i + 1}</span>
+                <div className="w-5 h-5 rounded-full border-2 border-black flex-none" style={{ background: p.avatarColor }} />
+                <span className={`flex-1 font-display font-black uppercase text-xl ${i === 0 ? 'text-[#0E0E16]' : 'text-white'}`}>{p.nickname}</span>
+                <span className={`font-display font-black text-2xl ${i === 0 ? 'text-[#0E0E16]' : 'text-[var(--yellow)]'}`}><CountUp value={p.totalScore} /> pts</span>
+              </motion.div>
+            ))}
+          </div>
+        </div>
+
+        {/* Hall of Shame */}
+        <div className="max-w-5xl mx-auto w-full">
+          <h2 className="font-display font-black uppercase tracking-widest text-2xl sm:text-4xl text-[var(--red)] mb-1 text-center">Hall of Shame</h2>
+          <p className="text-sm sm:text-base text-white/60 mb-5 sm:mb-7 font-display uppercase tracking-wide text-center">The 3 drawings the AI understood least</p>
+          <div className="flex flex-wrap gap-4 sm:gap-6 justify-center">
+            {hallOfShame.length === 0 && <p className="text-white/50 font-display uppercase text-lg sm:text-xl">No drawings to roast… yet.</p>}
+            {hallOfShame.map((d, i) => {
+              const p = playerMap[d.playerId.toString()];
+              const word = getWordForDrawing(d);
+              return (
+                <motion.div
+                  key={d.drawingId.toString()}
+                  className="flex-1 min-w-[240px] max-w-[320px] bg-[var(--surface)] border-4 border-[var(--red)] rounded-[24px] overflow-hidden flex flex-col"
+                  style={{ boxShadow: '8px 8px 0px 0px #8A0000' }}
+                  initial={{ opacity: 0, y: 24, rotate: i % 2 ? 2 : -2 }}
+                  animate={{ opacity: 1, y: 0, rotate: 0 }}
+                  transition={{ type: 'spring', stiffness: 240, damping: 18, delay: i * 0.1 }}
+                >
+                  {d.imageUrl ? (
+                    <img src={d.imageUrl} alt="drawing" className="w-full aspect-square object-cover bg-white" />
+                  ) : (
+                    <div className="w-full aspect-square bg-white flex items-center justify-center text-black/30 font-display uppercase">no image</div>
+                  )}
+                  <div className="p-5 flex flex-col gap-2.5 border-t-4 border-black">
+                    <div className="flex items-center gap-2.5">
+                      {p && <div className="w-4 h-4 rounded-full border-2 border-black" style={{ background: p.avatarColor }} />}
+                      <span className="font-display font-black uppercase text-lg text-white">{p?.nickname ?? '?'}</span>
+                      <span className="font-display uppercase text-sm text-white/50">· {word}</span>
+                    </div>
+                    <p className="text-sm font-display font-bold text-[var(--cyan)]">AI thought: “{d.aiGuess}”</p>
+                    <p className="text-base italic text-[var(--red)] leading-snug">“{d.aiRoast}”</p>
+                    <p className="font-display font-black text-3xl text-[var(--red)] mt-1">{d.roundScore} pts</p>
+                  </div>
+                </motion.div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Play Again */}
+        <div className="max-w-3xl mx-auto w-full flex flex-col items-center gap-4 pb-4">
+          {!replayOffer ? (
+            <BrutalButton color="magenta" size="xl" onClick={() => room && offerReplay({ roomId: room.roomId })}>
+              Play Again
+            </BrutalButton>
+          ) : (
+            <div className="bg-[var(--surface)] border-4 border-black rounded-[24px] shadow-[8px_8px_0_0_#000] px-10 py-7 flex flex-col items-center gap-3 w-full max-w-xl">
+              <p className="font-display font-black uppercase tracking-wide text-2xl text-[var(--cyan)]">Asking players to play again…</p>
+              <p className="font-display font-black text-6xl text-[var(--yellow)] tabular-nums">{replaySecsLeft}s</p>
+              <p className="font-display uppercase tracking-wide text-white/70">
+                <span className="text-[var(--green)] font-black">{replayYes}</span> of {players.length} said yes
+              </p>
+              <BrutalButton color="green" size="md" onClick={() => room && resolveReplay({ roomId: room.roomId })}>
+                Start now
+              </BrutalButton>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return null;
+}
+
+// Copy-to-clipboard button with "Copied!" feedback (presentation only)
+function CopyButton({ text, label, dark }: { text: string; label: string; dark?: boolean }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* clipboard unavailable */ }
+  };
+  return (
+    <button
+      onClick={copy}
+      aria-label={label}
+      className={`inline-flex items-center gap-1.5 rounded-xl border-[3px] border-black px-3 py-1.5 font-display font-bold uppercase text-xs tracking-wide shadow-[2px_2px_0_0_#000] transition-transform hover:scale-105 active:scale-95 active:shadow-none ${
+        dark ? 'bg-[#0E0E16] text-white' : 'bg-[var(--cyan)] text-[#0E0E16]'
+      }`}
+    >
+      {copied ? (
+        <>Copied</>
+      ) : (
+        <>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5">
+            <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+            <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+          </svg>
+          {label}
+        </>
+      )}
+    </button>
+  );
+}
+
+// Clean line crown (lucide-style), presentation only
+function CrownIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="#0E0E16" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="w-28 h-28">
+      <path d="m2 4 3 12h14l3-12-6 7-4-7-4 7-6-7z" />
+      <path d="M5 21h14" />
+    </svg>
+  );
+}
+
+// Bouncy three-dot loader (presentation only)
+function BouncyDots() {
+  return (
+    <div className="flex gap-2">
+      {[0, 1, 2].map(i => (
+        <span
+          key={i}
+          className="w-3 h-3 rounded-full bg-[#0E0E16] inline-block animate-bounce"
+          style={{ animationDelay: `${i * 0.15}s` }}
+        />
+      ))}
+    </div>
   );
 }

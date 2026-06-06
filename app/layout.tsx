@@ -3,15 +3,11 @@ import { Providers } from './providers';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'SpacetimeDB Next.js App',
-  description: 'A Next.js app powered by SpacetimeDB',
+  title: 'DoodleDash',
+  description: 'Draw fast. Get roasted. Win.',
 };
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
       <body>

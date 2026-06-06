@@ -32,6 +32,57 @@ export const Drawing = __t.object("Drawing", {
 });
 export type Drawing = __Infer<typeof Drawing>;
 
+export const Guess = __t.object("Guess", {
+  playerId: __t.u64(),
+  roundId: __t.u64(),
+  value: __t.i32(),
+});
+export type Guess = __Infer<typeof Guess>;
+
+export const HijackCanvas = __t.object("HijackCanvas", {
+  playerId: __t.u64(),
+  roundId: __t.u64(),
+  roomId: __t.u64(),
+  imageUrl: __t.string(),
+  updatedAt: __t.timestamp(),
+});
+export type HijackCanvas = __Infer<typeof HijackCanvas>;
+
+export const HijackPoint = __t.object("HijackPoint", {
+  pointId: __t.u64(),
+  roundId: __t.u64(),
+  roomId: __t.u64(),
+  toPlayerId: __t.u64(),
+  fromPlayerId: __t.u64(),
+  seq: __t.u32(),
+  pts: __t.string(),
+  color: __t.string(),
+  size: __t.f64(),
+  createdAt: __t.timestamp(),
+});
+export type HijackPoint = __Infer<typeof HijackPoint>;
+
+export const LiveCanvas = __t.object("LiveCanvas", {
+  playerId: __t.u64(),
+  roundId: __t.u64(),
+  roomId: __t.u64(),
+  imageUrl: __t.string(),
+  updatedAt: __t.timestamp(),
+});
+export type LiveCanvas = __Infer<typeof LiveCanvas>;
+
+export const PeekStroke = __t.object("PeekStroke", {
+  strokeId: __t.u64(),
+  roundId: __t.u64(),
+  roomId: __t.u64(),
+  playerId: __t.u64(),
+  seq: __t.u32(),
+  pts: __t.string(),
+  color: __t.string(),
+  size: __t.f64(),
+});
+export type PeekStroke = __Infer<typeof PeekStroke>;
+
 export const Player = __t.object("Player", {
   playerId: __t.u64(),
   roomId: __t.u64(),
@@ -42,9 +93,22 @@ export const Player = __t.object("Player", {
   totalScore: __t.i32(),
   sabotageAvailable: __t.bool(),
   connected: __t.bool(),
-  joinedAt: __t.u64(),
+  joinedAt: __t.timestamp(),
 });
 export type Player = __Infer<typeof Player>;
+
+export const Replay = __t.object("Replay", {
+  roomId: __t.u64(),
+  deadline: __t.timestamp(),
+});
+export type Replay = __Infer<typeof Replay>;
+
+export const ReplayVote = __t.object("ReplayVote", {
+  playerId: __t.u64(),
+  roomId: __t.u64(),
+  accept: __t.bool(),
+});
+export type ReplayVote = __Infer<typeof ReplayVote>;
 
 export const RevealTimer = __t.object("RevealTimer", {
   scheduledId: __t.u64(),
@@ -62,7 +126,8 @@ export const Room = __t.object("Room", {
   totalRounds: __t.u32(),
   currentRound: __t.u32(),
   wordSource: __t.string(),
-  createdAt: __t.u64(),
+  roundDurationSecs: __t.u32(),
+  createdAt: __t.timestamp(),
 });
 export type Room = __Infer<typeof Room>;
 
@@ -72,8 +137,8 @@ export const Round = __t.object("Round", {
   roundNumber: __t.u32(),
   word: __t.string(),
   status: __t.string(),
-  startedAt: __t.u64(),
-  endsAt: __t.u64(),
+  startedAt: __t.timestamp(),
+  endsAt: __t.timestamp(),
 });
 export type Round = __Infer<typeof Round>;
 
@@ -93,14 +158,20 @@ export const Sabotage = __t.object("Sabotage", {
   toPlayerId: __t.u64(),
   effect: __t.string(),
   active: __t.bool(),
-  createdAt: __t.u64(),
+  createdAt: __t.timestamp(),
 });
 export type Sabotage = __Infer<typeof Sabotage>;
+
+export const Spectate = __t.object("Spectate", {
+  roomId: __t.u64(),
+  active: __t.bool(),
+});
+export type Spectate = __Infer<typeof Spectate>;
 
 export const WordBank = __t.object("WordBank", {
   wordId: __t.u64(),
   text: __t.string(),
-  category: __t.option(__t.string()),
+  category: __t.string(),
 });
 export type WordBank = __Infer<typeof WordBank>;
 

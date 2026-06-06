@@ -20,5 +20,5 @@ export default __t.row({
   totalScore: __t.i32().name("total_score"),
   sabotageAvailable: __t.bool().name("sabotage_available"),
   connected: __t.bool(),
-  joinedAt: __t.u64().name("joined_at"),
+  joinedAt: __t.timestamp().name("joined_at"),
 });

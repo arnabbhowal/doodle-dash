@@ -11,13 +11,14 @@ import {
 } from "spacetimedb";
 
 export default __t.row({
-  roomId: __t.u64().primaryKey().name("room_id"),
-  code: __t.string(),
-  hostIdentity: __t.identity().name("host_identity"),
-  status: __t.string(),
-  totalRounds: __t.u32().name("total_rounds"),
-  currentRound: __t.u32().name("current_round"),
-  wordSource: __t.string().name("word_source"),
-  roundDurationSecs: __t.u32().name("round_duration_secs"),
+  pointId: __t.u64().primaryKey().name("point_id"),
+  roundId: __t.u64().name("round_id"),
+  roomId: __t.u64().name("room_id"),
+  toPlayerId: __t.u64().name("to_player_id"),
+  fromPlayerId: __t.u64().name("from_player_id"),
+  seq: __t.u32(),
+  pts: __t.string(),
+  color: __t.string(),
+  size: __t.f64(),
   createdAt: __t.timestamp().name("created_at"),
 });

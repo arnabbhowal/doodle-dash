@@ -11,5 +11,6 @@ import {
 } from "spacetimedb";
 
 export default {
-  code: __t.string(),
+  roomId: __t.u64(),
+  accept: __t.bool(),
 };

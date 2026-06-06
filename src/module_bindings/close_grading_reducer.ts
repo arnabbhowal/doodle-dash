@@ -11,5 +11,5 @@ import {
 } from "spacetimedb";
 
 export default {
-  code: __t.string(),
+  roundId: __t.u64(),
 };

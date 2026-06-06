@@ -11,5 +11,8 @@ import {
 } from "spacetimedb";
 
 export default {
-  code: __t.string(),
+  roundId: __t.u64(),
+  score: __t.i32(),
+  guess: __t.string(),
+  roast: __t.string(),
 };
