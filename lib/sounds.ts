@@ -5,27 +5,38 @@
 // plain constants so they're easy to tweak by ear.
 //
 // The click uses the Web Audio API (decoded once into a buffer, fired via a
-// buffer-source node) so it plays with ~no latency and overlaps cleanly on rapid
-// clicks. Audio is initialised on the first pointer/key interaction (which fires
-// just before the click), so even the first click is instant; an HTMLAudio path
-// is the fallback. Join is a one-shot HTMLAudio chime; the countdown plays in
-// full synced to the timer; the lobby track loops.
+// buffer-source node) so it plays with ~no latency and overlaps cleanly. Audio
+// unlocks + preloads on the first pointer/key interaction. Everything else uses
+// HTMLAudio: the lobby + while-drawing tracks loop; the countdown is a 5s clip
+// scheduled to END exactly when the timer hits 0; confetti/trombone are one-shots.
 //
-// The source one-shots had leading silence / multiple takes, so button-click and
-// player-join are pre-trimmed to a single clean hit (the *-trim.m4a files).
+// Source clips were trimmed to their meaningful region (see the *-trim work in
+// public/sounds): countdown = final 5.0s, while-drawing = 138s seamless loop.
 
 const SRC = {
-  click: '/sounds/button-click-trim.m4a', // trimmed to one ~0.3s click
-  join: '/sounds/player-join-trim.m4a',   // trimmed to the ~1s chime (no lead-in lag)
-  countdown: '/sounds/countdown.mp3',
-  lobby: '/sounds/lobby-music.m4a',        // AAC: plays on Safari + Chrome + Firefox
+  click: '/sounds/button-click-trim.m4a',
+  join: '/sounds/player-join.m4a',
+  countdown: '/sounds/countdown.m4a',   // 5.0s — scheduled to end at timer 0
+  lobby: '/sounds/lobby-music.m4a',
+  drawing: '/sounds/while-drawing.m4a', // looping ambient while a player draws
+  confetti: '/sounds/end-confetti.m4a',
+  trombone: '/sounds/sad-trombone.m4a',
 };
 
-const VOL = { click: 0.4, join: 0.6, countdown: 0.55, lobby: 0.25 };
+const VOL = {
+  click: 0.4,
+  join: 0.6,
+  countdown: 0.6,
+  lobby: 0.25,
+  drawing: 0.32,      // normal while-drawing volume
+  drawingDuck: 0.1,   // ducked while the countdown plays
+  confetti: 0.6,
+  trombone: 0.75,
+};
 
-// The countdown clip is ~5.1s; start it when this many seconds remain so it
-// finishes around 0. The host syncs the trigger to its round timer.
-export const COUNTDOWN_LEAD_SECS = 5;
+// The countdown clip is 5.0s; callers schedule it to start this long before the
+// round deadline so it finishes exactly at 0.
+export const COUNTDOWN_CLIP_MS = 5000;
 
 const canPlay = () => typeof window !== 'undefined' && typeof Audio !== 'undefined';
 
@@ -53,9 +64,6 @@ function preloadClick() {
     .catch(() => { /* fall back to HTMLAudio in playClick */ });
 }
 
-// Create + resume the context and decode the click buffer on the first user
-// interaction (a pointerdown precedes the click), so playback is unlocked and
-// the buffer is ready by the time the click fires. Avoids the autoplay warning.
 if (typeof window !== 'undefined') {
   const init = () => {
     const ctx = getCtx();
@@ -80,8 +88,7 @@ export function playClick() {
       return;
     } catch { /* fall through to HTMLAudio */ }
   }
-  if (ctx && !clickBuffer) preloadClick(); // not decoded yet — ready for next time
-  // Fallback for the very first click (buffer not ready) or if Web Audio is absent.
+  if (ctx && !clickBuffer) preloadClick();
   if (!canPlay()) return;
   try {
     const a = new Audio(SRC.click);
@@ -90,37 +97,50 @@ export function playClick() {
   } catch { /* ignore */ }
 }
 
-// ── Player-join chime (HTMLAudio one-shot) ────────────────────────────────────
-export function playJoin() {
+// ── Generic one-shots (latency not critical) ──────────────────────────────────
+function oneShot(src: string, volume: number) {
   if (!canPlay()) return;
   try {
-    const a = new Audio(SRC.join);
-    a.volume = VOL.join;
+    const a = new Audio(src);
+    a.volume = volume;
     void a.play().catch(() => {});
   } catch { /* ignore */ }
 }
+export const playJoin = () => oneShot(SRC.join, VOL.join);
+export const playConfetti = () => oneShot(SRC.confetti, VOL.confetti);
+export const playTrombone = () => oneShot(SRC.trombone, VOL.trombone);
 
-// ── Lobby music (looping singleton) ───────────────────────────────────────────
-let lobby: HTMLAudioElement | null = null;
-export function startLobbyMusic() {
-  if (!canPlay() || lobby) return;
+// ── Looping singletons (lobby music, while-drawing ambient) ───────────────────
+function makeLoop(src: string, volume: number): HTMLAudioElement | null {
+  if (!canPlay()) return null;
   try {
-    lobby = new Audio(SRC.lobby);
-    lobby.loop = true;
-    lobby.volume = VOL.lobby;
-    void lobby.play().catch(() => {});
+    const a = new Audio(src);
+    a.loop = true;
+    a.volume = volume;
+    void a.play().catch(() => {});
+    return a;
   } catch {
-    /* ignore */
-  }
-}
-export function stopLobbyMusic() {
-  if (lobby) {
-    try { lobby.pause(); } catch { /* ignore */ }
-    lobby = null;
+    return null;
   }
 }
 
-// ── Countdown (one-shot, synced to the timer's final seconds) ─────────────────
+let lobby: HTMLAudioElement | null = null;
+export function startLobbyMusic() { if (!lobby) lobby = makeLoop(SRC.lobby, VOL.lobby); }
+export function stopLobbyMusic() {
+  if (lobby) { try { lobby.pause(); } catch { /* ignore */ } lobby = null; }
+}
+
+let drawing: HTMLAudioElement | null = null;
+export function startDrawingMusic() { if (!drawing) drawing = makeLoop(SRC.drawing, VOL.drawing); }
+export function stopDrawingMusic() {
+  if (drawing) { try { drawing.pause(); } catch { /* ignore */ } drawing = null; }
+}
+// Duck the while-drawing ambient (e.g. while the countdown plays), then restore.
+export function duckDrawingMusic(ducked: boolean) {
+  if (drawing) drawing.volume = ducked ? VOL.drawingDuck : VOL.drawing;
+}
+
+// ── Countdown (one-shot, scheduled by the caller to end at the timer's 0) ──────
 let countdown: HTMLAudioElement | null = null;
 export function startCountdown() {
   if (!canPlay() || countdown) return;
@@ -134,8 +154,5 @@ export function startCountdown() {
   }
 }
 export function stopCountdown() {
-  if (countdown) {
-    try { countdown.pause(); } catch { /* ignore */ }
-    countdown = null;
-  }
+  if (countdown) { try { countdown.pause(); } catch { /* ignore */ } countdown = null; }
 }

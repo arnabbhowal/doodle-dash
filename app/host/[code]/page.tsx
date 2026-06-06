@@ -9,7 +9,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import { reducers, tables, procedures } from '../../../src/module_bindings';
 import type { Drawing, Player } from '../../../src/module_bindings/types';
 import { selectPending, roundFullyScored } from '../../../lib/scoring';
-import { startLobbyMusic, stopLobbyMusic, playJoin, startCountdown, stopCountdown, COUNTDOWN_LEAD_SECS } from '../../../lib/sounds';
+import { startLobbyMusic, stopLobbyMusic, playJoin, startCountdown, stopCountdown, playConfetti, COUNTDOWN_CLIP_MS } from '../../../lib/sounds';
 import { BrutalButton } from '../../components/BrutalButton';
 import { BrutalCard } from '../../components/BrutalCard';
 import { CountUp } from '../../components/CountUp';
@@ -236,6 +236,7 @@ export default function HostPage() {
   // Confetti celebration when the game finishes (presentation only)
   useEffect(() => {
     if (room?.status !== 'finished') return;
+    playConfetti();
     const end = Date.now() + 2500;
     const colors = ['#FF2E88', '#FFD60A', '#00E08A', '#19D3FF'];
     const frame = () => {
@@ -269,19 +270,18 @@ export default function HostPage() {
     if (joined) playJoin();
   }, [players, room?.status]);
 
-  // ── Sound: countdown synced to the round timer's final seconds ───────────────
-  // Driven by the secondsLeft tick, but the decision reads the LIVE deadline so a
-  // stale leftover secondsLeft at the start of round 2+ can't fire it early.
-  const countdownFired = useRef(false);
-  useEffect(() => { countdownFired.current = false; stopCountdown(); }, [currentRound?.roundId]);
+  // ── Sound: countdown scheduled to END exactly when the round timer hits 0 ─────
+  // Schedule the 5s clip to start COUNTDOWN_CLIP_MS before the deadline so it
+  // finishes on 0. Cleanup cancels it on round change or an early end (→ scoring).
   useEffect(() => {
-    if (room?.status !== 'in_round' || !currentRound) { stopCountdown(); countdownFired.current = false; return; }
-    const remain = Math.max(0, Math.ceil((Number(currentRound.endsAt.microsSinceUnixEpoch / 1000n) - Date.now()) / 1000));
-    if (!countdownFired.current && remain > 0 && remain <= COUNTDOWN_LEAD_SECS) {
-      countdownFired.current = true;
-      startCountdown();
-    }
-  }, [secondsLeft, room?.status, currentRound?.roundId]);
+    stopCountdown();
+    if (room?.status !== 'in_round' || !currentRound) return;
+    const endsMs = Number(currentRound.endsAt.microsSinceUnixEpoch / 1000n);
+    const delay = endsMs - COUNTDOWN_CLIP_MS - Date.now();
+    if (delay <= -COUNTDOWN_CLIP_MS) return; // already past the countdown window
+    const t = setTimeout(() => startCountdown(), Math.max(0, delay));
+    return () => { clearTimeout(t); stopCountdown(); };
+  }, [room?.status, currentRound?.roundId]);
 
   // ── Host-driven scoring (reactive; the SERVER reveals) ────────────────────────
   // The host is the single coordinator. While the round is in 'scoring' it scores
