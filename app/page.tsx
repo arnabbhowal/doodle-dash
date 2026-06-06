@@ -7,6 +7,7 @@ import { useReducer } from 'spacetimedb/react';
 import { reducers } from '../src/module_bindings';
 import { BrutalButton } from './components/BrutalButton';
 import { BrutalCard } from './components/BrutalCard';
+import { DoodleBackground } from './components/DoodleBackground';
 
 function randomCode() {
   return Math.random().toString(36).slice(2, 8).toUpperCase();
@@ -46,13 +47,10 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen relative flex flex-col items-center justify-center gap-10 p-8 overflow-hidden">
-      {/* Doodle background + light overlay (doodle stays prominent) */}
-      <div
-        className="absolute inset-0 z-0"
-        style={{ backgroundImage: 'url(/doodle-background.png)', backgroundSize: 'cover', backgroundPosition: 'center' }}
-      />
-      <div className="absolute inset-0 z-0 bg-[var(--canvas)]/55" />
+    <div className="min-h-screen relative flex flex-col items-center justify-center gap-10 p-8 overflow-hidden bg-[var(--canvas)]">
+      {/* Interactive doodle field over the dark canvas; light overlay keeps text legible */}
+      <DoodleBackground className="absolute inset-0 z-0" />
+      <div className="absolute inset-0 z-0 bg-[var(--canvas)]/30 pointer-events-none" />
 
       <div className="relative z-10 text-center">
         <h1 className="font-display font-black uppercase tracking-tight text-7xl sm:text-8xl text-white leading-none drop-shadow-[5px_5px_0_var(--magenta)]">
