@@ -5,23 +5,29 @@ import { useEffect, useRef } from 'react';
 // ── Interactive doodle-field background ───────────────────────────────────────
 // A full-area <canvas> of floating doodle PNGs (served as WebP from
 // /public/bg-doodles). Each doodle is a particle with a circular collision
-// boundary: they drift slowly, BOUNCE OFF EACH OTHER (no overlap) and the edges,
-// packing close together. When the pointer comes within REPULSION_RADIUS the
-// doodles scatter away (shoving their neighbours) and then ease back. Single
+// boundary: they drift slowly, bounce off each other (no overlap) and the edges.
+// When the pointer comes within REPULSION_RADIUS the doodles scatter away and
+// then ease back. The on-screen COUNT scales with the viewport area so small /
+// mobile screens aren't over-packed (which made doodles ping around), and a hard
+// MAX_SPEED cap means collisions/repulsion can never fling anything fast. Single
 // requestAnimationFrame loop, DPR-capped, pauses when the tab is hidden.
 //
 // Tunables — adjust freely:
 const IMG_BASE = '/bg-doodles';        // public/bg-doodles/doodle_001.webp ... _135.webp
 const IMG_COUNT = 135;
-const PARTICLE_COUNT = 135;            // how many doodles on screen
+const AREA_PER_DOODLE = 8000;          // viewport px² per doodle (lower = denser)
+const MIN_PARTICLES = 16;              // floor on tiny screens
+const MAX_PARTICLES = 300;             // ceiling; above IMG_COUNT (135) extra particles
+                                       //   reuse/duplicate images to fill large screens
 const BASE_SPEED = 0.2;                // drift speed in CSS px/frame
+const MAX_SPEED = 4;                   // hard cap on per-frame movement (anti-fling)
+const DRIFT_SPEED_CAP = BASE_SPEED * 2.5; // keep the resting drift calm after bounces
 const REPULSION_RADIUS = 150;          // px around the pointer that pushes doodles
 const REPULSION_FORCE = 1.6;           // strength of the scatter impulse
 const PUSH_DAMPING = 0.9;              // 0..1 — how quickly the scatter eases back
 const MIN_SCALE = 0.4;                 // doodle size range (source art is ~175px)
 const MAX_SCALE = 0.7;
 const COLLISION_RADIUS_FACTOR = 0.45;  // collision circle = imageSize * scale * this
-                                       //   (smaller = doodles can sit closer / touch)
 const ROTATION_SPEED = 0.001;          // max radians/frame of gentle spin
 const MAX_DPR = 2;                     // cap the backing-store resolution for perf
 
@@ -47,6 +53,7 @@ export function DoodleBackground({ className }: { className?: string }) {
     let W = 0, H = 0;
     let raf = 0;
     let running = true;
+    let imgSeq = 0; // cycles through images as particles are added
     const particles: Particle[] = [];
     const mouse = { x: -9999, y: -9999 };
 
@@ -58,7 +65,33 @@ export function DoodleBackground({ className }: { className?: string }) {
       imgs.push(img);
     }
 
-    const resize = () => {
+    const targetCount = () =>
+      Math.max(MIN_PARTICLES, Math.min(MAX_PARTICLES, Math.round((W * H) / AREA_PER_DOODLE)));
+
+    const makeParticle = (): Particle => {
+      const angle = Math.random() * Math.PI * 2;
+      return {
+        x: Math.random() * W,
+        y: Math.random() * H,
+        vx: Math.cos(angle) * BASE_SPEED,
+        vy: Math.sin(angle) * BASE_SPEED,
+        pvx: 0, pvy: 0,
+        scale: MIN_SCALE + Math.random() * (MAX_SCALE - MIN_SCALE),
+        rot: Math.random() * Math.PI * 2,
+        vr: (Math.random() - 0.5) * 2 * ROTATION_SPEED,
+        r: 0,
+        img: imgs[imgSeq++ % IMG_COUNT],
+      };
+    };
+
+    // Add/remove particles so the count matches the current viewport density.
+    const syncCount = () => {
+      const target = targetCount();
+      while (particles.length < target) particles.push(makeParticle());
+      while (particles.length > target) particles.pop();
+    };
+
+    const resizeCanvas = () => {
       const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
       W = window.innerWidth;
       H = window.innerHeight;
@@ -73,29 +106,10 @@ export function DoodleBackground({ className }: { className?: string }) {
       }
     };
 
-    const init = () => {
-      resize();
-      for (let i = 0; i < PARTICLE_COUNT; i++) {
-        const angle = Math.random() * Math.PI * 2;
-        particles.push({
-          x: Math.random() * W,
-          y: Math.random() * H,
-          vx: Math.cos(angle) * BASE_SPEED,
-          vy: Math.sin(angle) * BASE_SPEED,
-          pvx: 0, pvy: 0,
-          scale: MIN_SCALE + Math.random() * (MAX_SCALE - MIN_SCALE),
-          rot: Math.random() * Math.PI * 2,
-          vr: (Math.random() - 0.5) * 2 * ROTATION_SPEED,
-          r: 0,
-          img: imgs[i % imgs.length],
-        });
-      }
-    };
-
     const step = () => {
       ctx.clearRect(0, 0, W, H);
 
-      // 1. Pointer repulsion + integrate + (re)compute collision radius.
+      // 1. Pointer repulsion + integrate (speed-capped) + collision radius.
       for (const p of particles) {
         const dx = p.x - mouse.x;
         const dy = p.y - mouse.y;
@@ -106,8 +120,24 @@ export function DoodleBackground({ className }: { className?: string }) {
           p.pvx += (dx / d) * f;
           p.pvy += (dy / d) * f;
         }
-        p.x += p.vx + p.pvx;
-        p.y += p.vy + p.pvy;
+
+        // Keep the resting drift calm even after many bounces.
+        const vmag2 = p.vx * p.vx + p.vy * p.vy;
+        if (vmag2 > DRIFT_SPEED_CAP * DRIFT_SPEED_CAP) {
+          const s = DRIFT_SPEED_CAP / Math.sqrt(vmag2);
+          p.vx *= s; p.vy *= s;
+        }
+
+        // Hard cap on the actual per-frame movement so nothing can fling fast.
+        let mx = p.vx + p.pvx;
+        let my = p.vy + p.pvy;
+        const m2 = mx * mx + my * my;
+        if (m2 > MAX_SPEED * MAX_SPEED) {
+          const s = MAX_SPEED / Math.sqrt(m2);
+          mx *= s; my *= s;
+        }
+        p.x += mx;
+        p.y += my;
         p.pvx *= PUSH_DAMPING;
         p.pvy *= PUSH_DAMPING;
         p.rot += p.vr;
@@ -122,7 +152,7 @@ export function DoodleBackground({ className }: { className?: string }) {
           let dx = b.x - a.x;
           let dy = b.y - a.y;
           const minDist = a.r + b.r;
-          let d2 = dx * dx + dy * dy;
+          const d2 = dx * dx + dy * dy;
           if (d2 < minDist * minDist) {
             let d = Math.sqrt(d2);
             if (d < 0.0001) { // exact overlap — nudge in a random direction
@@ -135,7 +165,6 @@ export function DoodleBackground({ className }: { className?: string }) {
             const overlap = (minDist - d) * 0.5;
             a.x -= nx * overlap; a.y -= ny * overlap;
             b.x += nx * overlap; b.y += ny * overlap;
-            // Exchange the velocity component along the collision normal (equal mass).
             const rel = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
             if (rel < 0) {
               a.vx += rel * nx; a.vy += rel * ny;
@@ -173,6 +202,12 @@ export function DoodleBackground({ className }: { className?: string }) {
 
     const onMove = (e: PointerEvent) => { mouse.x = e.clientX; mouse.y = e.clientY; };
     const onLeave = () => { mouse.x = -9999; mouse.y = -9999; };
+    let resizeTimer: ReturnType<typeof setTimeout>;
+    const onResize = () => {
+      resizeCanvas();                          // keep the canvas crisp immediately
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(syncCount, 160); // re-thin/-fill the count after settling
+    };
     const onVisibility = () => {
       if (document.hidden) {
         running = false;
@@ -183,18 +218,20 @@ export function DoodleBackground({ className }: { className?: string }) {
       }
     };
 
-    init();
+    resizeCanvas();
+    syncCount();
     raf = requestAnimationFrame(step);
     window.addEventListener('pointermove', onMove, { passive: true });
     window.addEventListener('pointerout', onLeave);
-    window.addEventListener('resize', resize);
+    window.addEventListener('resize', onResize);
     document.addEventListener('visibilitychange', onVisibility);
 
     return () => {
       cancelAnimationFrame(raf);
+      clearTimeout(resizeTimer);
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerout', onLeave);
-      window.removeEventListener('resize', resize);
+      window.removeEventListener('resize', onResize);
       document.removeEventListener('visibilitychange', onVisibility);
     };
   }, []);
