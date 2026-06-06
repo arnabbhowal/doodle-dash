@@ -9,7 +9,7 @@ import { uploadDrawing, uploadHijackCanvas } from '../../../lib/supabase';
 import { BrutalButton } from '../../components/BrutalButton';
 import { BrutalCard } from '../../components/BrutalCard';
 import { CountUp } from '../../components/CountUp';
-import { startDrawingMusic, stopDrawingMusic, duckDrawingMusic, startCountdown, stopCountdown, playConfetti, playTrombone, COUNTDOWN_LEAD_MS } from '../../../lib/sounds';
+import { startCountdown, stopCountdown, COUNTDOWN_LEAD_MS } from '../../../lib/sounds';
 
 const COLORS = [
   '#000000','#6b7280','#ffffff','#8b5e34',          // black, gray, white, brown
@@ -314,7 +314,6 @@ export default function PlayPage() {
   // Confetti on the finished screen (matches the host's celebration).
   useEffect(() => {
     if (room?.status !== 'finished') return;
-    playConfetti();
     const end = Date.now() + 2000;
     const colors = ['#FF2E88', '#FFD60A', '#00E08A', '#19D3FF'];
     const frame = () => {
@@ -526,45 +525,16 @@ export default function PlayPage() {
     return () => clearInterval(id);
   }, [currentRound?.roundId, room?.status, alreadySubmitted]);
 
-  // ── Sound: while-drawing ambient loop during the round (until you submit) ─────
-  useEffect(() => {
-    if (room?.status === 'in_round' && currentRound && !alreadySubmitted) {
-      startDrawingMusic();
-      return () => stopDrawingMusic();
-    }
-  }, [room?.status, currentRound?.roundId, alreadySubmitted]);
-
-  // ── Sound: countdown (final 5s) scheduled to end at 0, ducking the ambient ────
+  // ── Sound: countdown (final 5s) scheduled to end at 0 ─────────────────────────
   useEffect(() => {
     stopCountdown();
-    duckDrawingMusic(false);
     if (room?.status !== 'in_round' || !currentRound || alreadySubmitted) return;
     const endsMs = Number(currentRound.endsAt.microsSinceUnixEpoch / 1000n);
     const delay = endsMs - COUNTDOWN_LEAD_MS - Date.now();
     if (delay <= -COUNTDOWN_LEAD_MS) return; // already past the countdown window
-    const t = setTimeout(() => { startCountdown(); duckDrawingMusic(true); }, Math.max(0, delay));
-    return () => { clearTimeout(t); stopCountdown(); duckDrawingMusic(false); };
+    const t = setTimeout(() => { startCountdown(); }, Math.max(0, delay));
+    return () => { clearTimeout(t); stopCountdown(); };
   }, [room?.status, currentRound?.roundId, alreadySubmitted]);
-
-  // ── Sound: sad trombone when the Hall of Shame scrolls into view (finished) ───
-  const hallRef = useRef<HTMLDivElement>(null);
-  const trombonePlayed = useRef(false);
-  useEffect(() => {
-    if (room?.status !== 'finished') { trombonePlayed.current = false; return; }
-    const el = hallRef.current;
-    if (!el || trombonePlayed.current) return;
-    const obs = new IntersectionObserver((entries) => {
-      for (const e of entries) {
-        if (e.isIntersecting && !trombonePlayed.current) {
-          trombonePlayed.current = true;
-          playTrombone();
-          obs.disconnect();
-        }
-      }
-    }, { threshold: 0.25 });
-    obs.observe(el);
-    return () => obs.disconnect();
-  }, [room?.status, drawings]);
 
 
   // Auto-submit when time is nearly up. Fire at <=1s (NOT exactly 0): at 0 the round
@@ -1387,7 +1357,7 @@ export default function PlayPage() {
           players.forEach(p => { playerMap[p.playerId.toString()] = p; });
           if (shame.length === 0) return null;
           return (
-            <div ref={hallRef} className="w-full max-w-[400px]">
+            <div className="w-full max-w-[400px]">
               <h2 className="font-display font-black uppercase tracking-widest text-[var(--red)] text-xl mb-1">Hall of Shame</h2>
               <p className="text-xs text-white/60 mb-3 font-display uppercase tracking-wide">Drawings the AI understood least</p>
               <div className="flex flex-col gap-3">

@@ -9,7 +9,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import { reducers, tables, procedures } from '../../../src/module_bindings';
 import type { Drawing, Player } from '../../../src/module_bindings/types';
 import { selectPending, roundFullyScored } from '../../../lib/scoring';
-import { startLobbyMusic, stopLobbyMusic, playJoin, startCountdown, stopCountdown, playConfetti, COUNTDOWN_LEAD_MS } from '../../../lib/sounds';
+import { startLobbyMusic, stopLobbyMusic, playJoin, startCountdown, stopCountdown, COUNTDOWN_LEAD_MS } from '../../../lib/sounds';
 import { BrutalButton } from '../../components/BrutalButton';
 import { BrutalCard } from '../../components/BrutalCard';
 import { CountUp } from '../../components/CountUp';
@@ -236,7 +236,6 @@ export default function HostPage() {
   // Confetti celebration when the game finishes (presentation only)
   useEffect(() => {
     if (room?.status !== 'finished') return;
-    playConfetti();
     const end = Date.now() + 2500;
     const colors = ['#FF2E88', '#FFD60A', '#00E08A', '#19D3FF'];
     const frame = () => {
