@@ -7,3 +7,21 @@ dist
 .DS_Store
 
 spacetime.local.json
+<<<<<<< Updated upstream
+=======
+
+# Local env — add secrets to Vercel dashboard, not here
+.env.local
+.env*.local
+
+# TypeScript build cache
+tsconfig.tsbuildinfo
+
+# Memory files (local only)
+memory/
+
+# reskin leftovers
+/doodle-background.png
+/Party Drawing Game UI Design/
+.vercel
+>>>>>>> Stashed changes

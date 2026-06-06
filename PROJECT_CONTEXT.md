@@ -4,7 +4,9 @@
 >
 > **Major milestones since the first build:** (1) the AI-scoring pipeline was re-architected from "procedure writes to DB" to "procedure returns JSON → reducer persists" to kill a cross-transaction race; (2) scoring is now **completion-driven** (the round won't reveal until every drawing is scored) with a server fallback; (3) a full **neo-brutalist UI reskin** (Tailwind v4 + motion + Fredoka/Inter) was layered on top without touching game logic; (4) round duration is configurable; (5) a `record_score` reducer and `seed_words` reducer were added.
 >
-> **Newer milestones (2026-06-02 → 06-03):** (6) scoring moved from **per-phone** to **host-driven** — the host screen scores every drawing (bounded-parallel Gemini, reactive over live data) and persists via `record_score_for`; the **server** flips to reveal once all drawings are scored (`record_score_for` / `end_round`), so the client never reveals and can't race the backstop; (7) **room-scoped player lookup** (`findPlayerInRoom`) fixed a stale-identity mis-attribution bug (a returning identity has one player row per game; the old global lookup attributed drawings/scores/sabotage to the wrong room); (8) the speed bonus is computed from the **server clock** in `submit_drawing` (client `secondsLeft` ignored); (9) **iOS Safari resilience** on `/play` — render is gated on subscription readiness (`useTable`'s `isReady`), Supabase uploads retry, and reload watchdogs resync a suspended/stale socket. See §7, §8.4, §11 (bugs 15–20).
+> **Newer milestones (2026-06-02 → 06-03):** (6) scoring moved from **per-phone** to **host-driven** — the host screen scores every drawing (bounded-parallel Gemini, reactive over live data) and persists via `record_score_for`; the **server** flips to reveal once all drawings are scored (`record_score_for` / `end_round`), so the client never reveals and can't race the backstop; (7) **room-scoped player lookup** (`findPlayerInRoom`) fixed a stale-identity mis-attribution bug (a returning identity has one player row per game; the old global lookup attributed drawings/scores/sabotage to the wrong room); (8) the speed bonus is computed from the **server clock** in `submit_drawing` (client `secondsLeft` ignored); (9) iOS `/play` resilience heuristics were added (isReady gating, upload retry, reload watchdogs) — but see milestone (10): they were treating symptoms of a transport bug.
+>
+> **Latest milestones (2026-06-04 → 06-05):** (10) **iOS root cause FOUND & FIXED (the big one):** every iPhone/Mac-Safari `/play` failure (no drawing shown, "No drawing submitted", missing Hall of Shame, stuck on Syncing/scoring) was **one transport bug** — the SpacetimeDB TS SDK ≤2.3.x silently drops *compressed* WebSocket frames on all WebKit browsers ([clockworklabs/SpacetimeDB #5031](https://github.com/clockworklabs/SpacetimeDB/issues/5031), fixed in SDK 2.4.0). **Fix = `.withCompression('none')`** in `app/providers.tsx`. (11) **Self-grade bonus:** after submitting, a player locks a guess of their *own* AI score; if it's within ±5 (and base ≥20) they get **+100** to the AI score. Adds a `scoring` **grade window** (~10s) the host waits out before AI-scoring. (12) **Play Again:** host opens a 10s vote on the finished screen; accepters continue in a fresh lobby (scores/data reset), everyone else is dropped. (13) **`end_round` now leaves PENDING placeholders** (unscored) for non-submitters + a grace window, so an in-flight auto-submit landing just after the buzzer still gets AI-scored instead of a hard 0. See §6, §7, §8, §11 (bugs 15–24).
 
 ---
 
@@ -149,25 +151,34 @@ doodledash/
 |---|---|---|
 | `room` | ✓ | One row per game room. `status`, `host_identity`, `total_rounds`, `current_round`, `word_source`, **`round_duration_secs`**, `created_at`. |
 | `player` | ✓ | One row per human participant (host is NOT a player). `total_score`, `sabotage_available`, `avatar_color`, etc. |
-| `round` | ✓ | One row per round. `word`, `round_number`, `status`, `started_at`, `ends_at`. |
+| `round` | ✓ | One row per round. `word`, `round_number`, `status`, `started_at`, `ends_at`. **`ends_at` is dual-purpose:** the draw deadline during `drawing`, then **repurposed as the self-grade deadline** during `scoring`. |
 | `drawing` | ✓ | One row per player per round. `image_url`, `submitted`, `seconds_left`, `ai_score`, `ai_guess`, `ai_roast`, `round_score`, `scored`. |
 | `sabotage` | ✓ | Active sabotage effects. Victim subscribes filtered by `to_player_id`. Has `created_at` (used for the client-side lifetime). |
-| `word_bank` | ✗ | **172** preset words seeded at init (`category='preset'`). Custom words tagged `custom_<roomId>`. |
+| `guess` | ✓ | **Self-grade** — one row per player (`player_id` PK, overwritten each round), `round_id` + `value` (0–100). The player's guess of their OWN AI score this round; `round_id` guards a stale guess from leaking a bonus into a later round. |
+| `replay` | ✓ | **Play Again** — one active "play again?" offer per room (`room_id` PK, `deadline`). |
+| `replay_vote` | ✓ | **Play Again** — one vote per player (`player_id` PK, `room_id`, `accept`). |
+| `word_bank` | ✗ | **172** preset words seeded at init (`category='preset'`). Custom words tagged `custom_<roomId>` (cleared on Play Again). |
 | `config` | ✗ | Single row (id=0) holding `gemini_api_key`. Never log it. |
-| `round_timer` | ✗ (schedule) | Fires `end_round` at `round.ends_at`. |
-| `reveal_timer` | ✗ (schedule) | Fires `finalize_round` (now a **25s** fallback after scoring begins). |
+| `round_timer` | ✗ (schedule) | Fires `end_round` at the draw deadline. |
+| `reveal_timer` | ✗ (schedule) | Fires `finalize_round` — the **grace/crash backstop** (45s after an early-end, or `END_GRACE` 25s after the timer-driven `end_round`). |
+
+**Timing constants (top of `index.ts`):** `GRADE_WINDOW_MICROS = 10s` (self-grade window the host waits before AI-scoring), `END_GRACE_MICROS = 25s` (grace after the round timer so a late auto-submit can still land + be scored), `REVEAL_MICROS = 45s` (backstop after an early-end).
 
 **`drawing` row sentinel values:**
-- `ai_score = -1`, `scored = false` → submitted, **awaiting AI**.
-- `ai_score >= 0`, `scored = true` → scored (by `record_score_for` (host-driven, current), the `finalize_round` backstop, or an `end_round` non-submitter placeholder).
-- Non-submitter placeholder (created by `end_round`): `submitted = true, ai_score = 0, scored = true, image_url = '', ai_roast = "Didn't even try. Bold."`.
+- `ai_score = -1`, `scored = false`, `submitted = true` → submitted, **awaiting AI**.
+- `ai_score = -1`, `scored = false`, `submitted = false` → **PENDING non-submitter placeholder** (created by `end_round`): keeps the round OPEN so an in-flight auto-submit can still land and be scored; otherwise `finalize_round` scores it 0.
+- `0 ≤ ai_score ≤ 100`, `scored = true` → scored (by `record_score_for`, or the `finalize_round` backstop).
+- `ai_score > 100` (120–200), `scored = true` → scored **with the +100 self-grade bonus** (the client uses `ai_score > 100` to show the BONUS celebration — no extra column).
 
 ### Room status flow
 ```
 lobby → in_round → scoring → reveal → (next_round → in_round | finished)
+                                                          ↑ finished → (Play Again vote) → lobby
 ```
 - `in_round → scoring` happens via **early-end** (all players submitted, inside `submit_drawing`) OR the `round_timer` firing `end_round`.
-- `scoring → reveal` happens **as soon as every drawing is scored** (inside `record_score`), or via the 25s `reveal_timer` fallback (`finalize_round`).
+- **`scoring` has a ~10s self-grade window** (`GRADE_WINDOW_MICROS`): `round.ends_at` is reset to the grade deadline; players lock a guess of their own AI score; the **host waits out this window before AI-scoring** (and shortens it via `close_grading` once every submitter has locked).
+- `scoring → reveal` happens **as soon as every drawing is scored** (inside `record_score_for`), or via the `reveal_timer` backstop (`finalize_round`).
+- `finished → lobby` happens via **Play Again** (`offer_replay` → players `vote_replay` → host `resolve_replay`): accepters continue in a reset lobby, the rest are dropped.
 
 ### Reducers (writes only, atomic, no HTTP)
 
@@ -182,17 +193,22 @@ lobby → in_round → scoring → reveal → (next_round → in_round | finishe
 | `start_game(roomId, totalRounds, wordSource, customWords, roundDuration)` | host | Validates ≥2 players, seeds custom words, sets `round_duration_secs`, begins round 1 |
 | `next_round(roomId)` | host | Marks current round `done`; begins next or sets `finished` |
 | `end_game(roomId)` | host | Forces `finished` |
-| `submit_drawing(roundId, imageUrl, secondsLeft)` | player | Insert/update drawing (resets scoring fields). **Speed bonus is computed from the SERVER clock** (`ends_at − now`); the client-sent `secondsLeft` is ignored (anti-skew/anti-cheat). **Rejects late submits once the round is past `scoring`** (`drawing`/`scoring` only) so a stray submit can't strand a drawing after reveal. **Early-ends the round when all players have submitted** (→ scoring + schedules reveal fallback). |
+| `offer_replay(roomId)` | host | **Play Again.** Only when `finished`. Clears any stale offer/votes, opens a fresh 10s `replay` window. |
+| `vote_replay(roomId, accept)` | player | Records/updates the caller's yes/no vote (`replay_vote`). No-op if the offer is closed. |
+| `resolve_replay(roomId)` | host | Called at the deadline (or early once all voted). **Keeps + resets accepters** (`total_score=0`, sabotage back), **deletes everyone else**, wipes the room's rounds/drawings/sabotages/custom-words/votes, → `lobby` (`current_round=0`). Idempotent. |
+| `submit_drawing(roundId, imageUrl, secondsLeft)` | player | Insert/update drawing (resets scoring fields). **Speed bonus computed from the SERVER clock** (`ends_at − now`, **only during `drawing`** — during `scoring`, `ends_at` is the grade deadline so a late submit mines no bonus); client `secondsLeft` ignored. **Accepts only while `drawing`/`scoring`** (a post-reveal submit can't strand a drawing). **Early-ends when all submitted** → `scoring` (sets `ends_at` to the grade deadline) + schedules the backstop. |
+| `submit_guess(roundId, value)` | player | **Self-grade.** Locks the caller's guess (0–100, clamped) of their own AI score for `roundId` (upserts the `guess` row). The bonus is applied later in `record_score_for`. |
+| `close_grading(roundId)` | host | Cuts the self-grade window short (moves `round.ends_at` to now) once every submitter has locked a guess — only ever SHORTENS. |
 | `use_sabotage(roundId, targetPlayerId, effect)` | player | Caller must have submitted this round. **Target must NOT have already submitted** (authoritative — mirrors the client menu). One per game (`sabotage_available`). |
-| `record_score(roundId, score, guess, roast)` | player | **LEGACY / unused by the current client** (the old per-phone path; kept and still correct). Persists the caller's AI result + `total_score` atomically; idempotent; server-driven reveal when all scored. Superseded by `record_score_for` (host-driven). |
-| **`record_score_for(roundId, playerId, score, guess, roast)`** | host | **Host-driven scoring (current).** Persists ONE drawing's AI result (`ai_score/ai_guess/ai_roast/round_score = clamp(score)+seconds_left/scored=true`) **and** that player's `total_score`, atomically. Idempotent (`scored && ai_score >= 0` → skip). **Server-driven reveal:** after persisting, if every drawing in the round is scored, flips room/round → `reveal`. Reducers are serialized, so the last one to complete the set performs the flip exactly once. |
-| **`reveal_round(roundId)`** | host | Flips room/round `scoring → reveal`. Mostly redundant now that `record_score_for`/`end_round` do the server-side reveal; the host no longer calls it. Kept (harmless). |
-| `end_round(arg)` | SCHEDULED | Round timer expired: → scoring, inserts 0-score placeholders for non-submitters, clears sabotages. **If nobody submitted (all placeholders already scored), reveals immediately.** Otherwise schedules `finalize_round` (+45s). |
-| `finalize_round(arg)` | SCHEDULED | **Backstop only** (host crash/close). Force-finalizes any still-unscored submitted drawing with a **speed-only** score (and adds it to the player total), then → reveal. No-op if already revealed. |
+| `record_score(roundId, score, guess, roast)` | player | **LEGACY / unused by the current client** (the old per-phone path; kept and still correct). Persists the caller's AI result + `total_score`; idempotent; server-driven reveal. Superseded by `record_score_for`. |
+| **`record_score_for(roundId, playerId, score, guess, roast)`** | host | **Host-driven scoring (current).** Persists ONE drawing's AI result + that player's `total_score`, atomically. Idempotent. **Self-grade bonus:** if the player locked a `guess` for this round, the base `score ≥ 20`, and `|guess − score| ≤ 5`, stores `ai_score = score + 100` (→ `round_score = ai_score + seconds_left`). **Server-driven reveal:** if every drawing is now scored, flips room/round → `reveal` (serialized — the last one flips exactly once). |
+| **`reveal_round(roundId)`** | host | Flips `scoring → reveal`. Redundant now that `record_score_for`/`finalize_round` reveal server-side; the host no longer calls it. Kept (harmless). |
+| `end_round(arg)` | SCHEDULED | Round timer expired → `scoring` (sets `ends_at` to the grade deadline). Inserts a **PENDING placeholder** (`submitted=false`, **unscored**) for each non-submitter — this keeps the round OPEN so an in-flight auto-submit can still land + be AI-scored. Clears sabotages, schedules `finalize_round` (+`END_GRACE` 25s). |
+| `finalize_round(arg)` | SCHEDULED | **Grace/crash backstop.** Finalizes EVERY still-unscored drawing: a real submitted-but-unscored one → **speed-only** score (added to total); a PENDING placeholder (never drew / upload failed) → **honest 0**. Then → reveal. No-op if already revealed. |
 
 **Internal helpers:**
 - `beginRound(ctx, roomId, n)` — picks an unused word (timestamp-mod selection), inserts the `round` row with `ends_at = now + round_duration_secs`, inserts the `round_timer`, sets room `in_round`.
-- **`findPlayerInRoom(ctx, identity, roomId)`** — returns the caller's player row **scoped to the room** (identity AND `room_id`). Replaces the old `findPlayerByIdentity` (which matched identity alone and returned an arbitrary/stale row when an identity had played multiple games — see Bug 16). Used by `submit_drawing`, `use_sabotage`, `record_score`.
+- **`findPlayerInRoom(ctx, identity, roomId)`** — returns the caller's player row **scoped to the room** (identity AND `room_id`). Replaces the old `findPlayerByIdentity` (which matched identity alone and returned an arbitrary/stale row when an identity had played multiple games — see Bug 16). Used by `submit_drawing`, `submit_guess`, `use_sabotage`, `vote_replay`, `record_score`.
 
 > **`REVEAL_MICROS` = 45s** (was 25s): the `reveal_timer`/`finalize_round` backstop is now generous because the host legitimately drives scoring/reveal — the timer must not race a host still waiting on Gemini.
 
@@ -240,8 +256,13 @@ Scoring is **host-driven** and **server-revealed**. The single host screen (alwa
 1. Players submit (each phone):
    client → submit_drawing(roundId, imageUrl, secondsLeft)   [reducer]
             → drawing row { submitted:true, ai_score:-1, scored:false }
-              (seconds_left computed SERVER-side from ends_at − now)
-            → if ALL players submitted, round/room → 'scoring' + schedule 45s backstop
+              (seconds_left computed SERVER-side from ends_at − now, during 'drawing' only)
+            → if ALL players submitted, round/room → 'scoring' (ends_at := grade deadline)
+              + schedule backstop. Else round_timer → end_round (PENDING placeholders).
+
+1b. SELF-GRADE WINDOW (~10s, while 'scoring'): each submitter locks a guess of their own
+    AI score → submit_guess(roundId, value). The HOST waits out round.ends_at before it
+    starts AI-scoring (and calls close_grading to cut it short once all have locked).
 
 2. HOST scores EVERY drawing (app/host — reactive loop over LIVE table data):
    for each pending drawing (submitted && not scored), with bounded concurrency (4):
@@ -249,20 +270,23 @@ Scoring is **host-driven** and **server-revealed**. The single host screen (alwa
             → returns JSON { ok, score, guess, roast }   (NO db write)
             → retries on !ok (429/transient) with backoff; speed-only fallback if exhausted
      host → recordScoreFor({ roundId, playerId, score, guess, roast })   [reducer]
-            → updates that drawing (ai_score, round_score = score + seconds_left, scored=true)
-              AND that player's total_score, ATOMICALLY
+            → ai_score = score (+100 if self-grade within ±5 and score≥20);
+              round_score = ai_score + seconds_left; updates drawing + player total ATOMICALLY
 
 3. SERVER reveals (NOT the client):
    inside record_score_for, once every drawing in the round is scored → room/round → 'reveal'.
-   (end_round also reveals immediately if nobody submitted.) The host NEVER calls reveal,
-   so nothing can race ahead of a score and the backstop can't be defeated by an early flip.
+   The host NEVER calls reveal, so nothing can race ahead of a score.
 
-4. Server BACKSTOP (host crash/close only): if the round is still 'scoring' after 45s,
-   finalize_round force-finalizes remaining drawings with a speed-only score (added to the
-   player total) and flips to reveal. Nothing is ever left stuck at ai_score=-1.
+4. Server BACKSTOP: a real submitted drawing the host never scored → speed-only; a PENDING
+   non-submitter placeholder → honest 0. finalize_round runs at the grace deadline (or 45s
+   after an early-end). Nothing is ever left stuck at ai_score=-1.
 ```
 
-**The host loop is reactive, not a one-time snapshot.** It reads the *live* `drawings`/`currentRound` via refs each iteration and keeps scoring any still-pending drawing until all are scored — so late submissions and a host that mounted/refreshed mid-`scoring` are always picked up. A `dispatched` set prevents double-calling Gemini for the same drawing; it never reveals (the server does).
+**The host loop is reactive, not a one-time snapshot.** It reads the *live* `drawings`/`currentRound`/`guesses` via refs each iteration and keeps scoring any still-pending drawing until all are scored — so late submissions and a host that mounted/refreshed mid-`scoring` are always picked up. A `dispatched` set prevents double-calling Gemini; it never reveals (the server does).
+
+**PENDING placeholders + grace (the "timed out → 0 even though I drew" fix):** when the round timer expires, `end_round` inserts an **unscored** placeholder (`submitted=false`) for each non-submitter rather than a hard 0. Because reveal requires *every* drawing scored, the round stays open through `END_GRACE` (25s) — long enough for an auto-submit whose upload finished a beat after the buzzer to land, replace the placeholder, and be AI-scored. Truly-never-drew players are scored 0 by `finalize_round`.
+
+**Self-grade bonus:** in `record_score_for`, if the player locked a `guess` for this round and it's within ±5 of the real AI score (and the base score ≥ 20), `ai_score` is stored as `score + 100` (range 120–200). The client detects `ai_score > 100` to fire a BONUS celebration — no schema change.
 
 **Why host-driven?** The earlier **per-phone** model (each phone scored its own drawing via `record_score`, client retried, reveal flipped when all scored) was fragile: a backgrounded/throttled phone, a per-phone 429, or a dropped call could leave a drawing stuck, and a client-driven reveal could race the backstop and discard a real AI result. Centralizing on the host (one reliable coordinator) throttles Gemini, removes the thundering herd, and makes reveal deterministic.
 
@@ -354,6 +378,12 @@ What remains on `/play` (all pre-dates the compression saga and is still correct
 
 > **Identity note:** `myIdentity` is read as `getConnection()?.identity`. A reactive `useSpacetimeDB().identity` was tried and reverted (it widened the undefined-on-first-render window and blanked screens); if revisited, every `isEqual(myIdentity)` MUST be undefined-guarded.
 
+### 8.6 Self-grade bonus (player + host)
+After submitting, the player gets a **guess panel** (a 0–100 slider) to predict their own AI score, shown during `in_round` (post-submit) and into `scoring`. `submit_guess(roundId, value)` locks it (upsert). It **auto-locks** the current slider value if they don't tap "Lock in" before the grade window closes (a `useRef` holds the latest value for the auto-lock). The host's scoring loop **waits out `round.ends_at`** (the ~10s grade deadline) before AI-scoring, and calls `close_grading` to end it early once every submitter has locked. When the score lands, `record_score_for` applies **+100** if the guess is within ±5 (and base ≥ 20); the client detects `aiScore > 100` and fires a celebratory burst.
+
+### 8.7 Play Again (host + player)
+On the **finished** screen the host can open a **10s vote** (`offer_replay`). Each phone sees a Yes/No prompt (`vote_replay`) with a live countdown. The host page ticks the countdown and calls `resolve_replay` once everyone has voted OR the deadline passes (idempotent). Accepters land back in a fresh **lobby** (scores/data reset); the rest are dropped (the play page tracks "I was a player this session" so a dropped player gets a sensible screen rather than a flicker).
+
 ---
 
 ## 9. UI Reskin (neo-brutalist arcade)
@@ -397,6 +427,9 @@ Player  = { playerId, roomId, identity, nickname, avatarColor, isHost, totalScor
 Round   = { roundId, roomId, roundNumber, word, status, startedAt, endsAt }
 Drawing = { drawingId, roundId, roomId, playerId, imageUrl, submitted, secondsLeft, aiScore, aiGuess, aiRoast, roundScore, scored }
 Sabotage= { sabotageId, roundId, roomId, fromPlayerId, toPlayerId, effect, active, createdAt }
+Guess   = { playerId, roundId, value }                      ← NEW (self-grade)
+Replay  = { roomId, deadline }                              ← NEW (Play Again offer)
+ReplayVote = { playerId, roomId, accept }                   ← NEW (Play Again vote)
 ```
 
 Reducer params:
@@ -409,7 +442,10 @@ Reducer params:
 - `useSabotage`: `{ roundId, targetPlayerId, effect }`
 - `recordScore`: `{ roundId, score, guess, roast }`  (LEGACY — per-phone path, unused by current client)
 - `recordScoreFor`: `{ roundId, playerId, score, guess, roast }`  ← NEW (host-driven scoring, current)
-- `revealRound`: `{ roundId }`  ← NEW (host-only; now redundant with server-side reveal, unused by client)
+- `revealRound`: `{ roundId }`  ← (host-only; redundant with server-side reveal, unused by client)
+- `submitGuess`: `{ roundId, value }`  ← NEW (self-grade)
+- `closeGrading`: `{ roundId }`  ← NEW (host shortens the grade window)
+- `offerReplay` / `voteReplay` / `resolveReplay`: `{ roomId }` / `{ roomId, accept }` / `{ roomId }`  ← NEW (Play Again)
 - `setConfig`: `{ apiKey }`
 - `seedWords`: `{}`
 
@@ -445,6 +481,7 @@ Procedure params (both return `string`):
 20. **Late submit after reveal stranded a drawing:** an auto-submit landing after the round revealed reset the row to unscored with no one left to score it. **Fix:** `submit_drawing` rejects submissions once the round is past `scoring`.
 21–23. **(retracted)** A first pass attributed the iOS failures to three separate causes — screen-dim socket suspension (Wake Lock), subscription cache eviction (sticky ids), and unreliable `isReady` (settle timer + data-aware gate). All three were **symptoms of Bug 24**, and those heuristic fixes were reverted. Numbers kept as a tombstone so the history reads straight.
 24. **iOS/macOS WebKit WebSocket decompression bug → empty `drawings`, missing Hall of Shame, stuck scoring/syncing (MAJOR, the real one):** the SpacetimeDB TS SDK (≤2.3.x) drops every compressed WS frame on WebKit (`TypeError: undefined is not a function …decompressedStream…`, clockworklabs/SpacetimeDB#5031, fixed v2.4.0). The server compresses only frames over a size threshold, so small room/player frames arrived (standings correct) but the large `drawing` snapshot + batched updates were dropped → empty `drawings` cache and missed reveals on iPhone/iPad/Mac-Safari; Android/desktop (Blink) were fine. **Diagnosis tell:** an empty Hall of Shame (it reads ALL players' drawings) while the leaderboard was correct ⇒ the whole `drawings` cache was empty, not just my row. **Fix:** `.withCompression('none')` on the connection builder (`app/providers.tsx`). Revisit when on SDK ≥ 2.4.0.
+25. **"Timed out → 0 even though I drew something":** `end_round` used to insert a *final 0* placeholder for non-submitters, so an auto-submit whose upload finished a beat after the buzzer had nowhere to land. **Fix:** `end_round` now inserts a **PENDING** (unscored, `submitted=false`) placeholder that keeps the round open through a `END_GRACE` (25s) window; a late auto-submit replaces it and gets AI-scored; `finalize_round` scores a genuine no-show 0. (See §6 sentinels, §7.)
 
 ---
 
@@ -459,12 +496,16 @@ Procedure params (both return `string`):
    (server computes the speed bonus). The phone just watches its own drawing row.
 6. Optional: use_sabotage(targetPlayerId, effect) → victim's canvas gets the effect for
    round_duration/10 seconds.
-7. Round → scoring when all submitted (early-end) or the round timer fires (end_round).
-8. HOST scores every drawing (scoreDrawing HTTP → recordScoreFor) → the SERVER flips to
-   reveal once all are scored; the 45s finalize_round is a host-crash backstop.
-9. Reveal: host shows the gallery + leaderboard; players see their own score/rank.
-10. Host "Next Round" → repeat; after the last round → finished: champion + confetti + standings
+7. Round → scoring when all submitted (early-end) or the round timer fires (end_round,
+   which leaves PENDING placeholders for no-shows so a late auto-submit can still land).
+8. scoring has a ~10s SELF-GRADE window: each player locks a guess of their own AI score
+   (submit_guess); the HOST waits it out (close_grading ends it early if all locked).
+9. HOST scores every drawing (scoreDrawing HTTP → recordScoreFor; +100 if self-grade within
+   ±5) → the SERVER flips to reveal once all are scored; finalize_round is the grace/crash backstop.
+10. Reveal: host shows the gallery + leaderboard; players see their own score/rank (+ BONUS burst).
+11. Host "Next Round" → repeat; after the last round → finished: champion + confetti + standings
     + Hall of Shame (3 lowest round_score drawings with imageUrl).
+12. Optional: host opens "Play Again" → players vote → accepters restart in a fresh lobby.
 ```
 
 ---
@@ -526,7 +567,7 @@ spacetime call doodledash set_config '"<GEMINI_KEY>"'
 - **Gemini free tier** rate-limits (429); add billing for real load. On 429 the player still gets the speed bonus.
 - **`round_id` is a global autoincrement** — it never resets between games (round 1 of a new game might be `round_id=40`). The displayed Round NUMBER (`round_number`) is always 1..N. Don't confuse the two when reading logs.
 - **No spectator support.** A player's identity IS stable across reloads (token persisted in `localStorage`), but the **same identity accumulates one player row per game** it has played; lookups are now room-scoped (`findPlayerInRoom`) so this no longer mis-attributes, but the old rows linger in the DB.
-- **iOS Safari socket suspension (residual):** the SDK has no auto-reconnect; if an iPhone is fully backgrounded/dimmed mid-round it can miss that round (see §8.5). Mitigated (isReady gating, upload retry, reload watchdogs) but not fully eliminated. Android Chrome is unaffected.
+- **iOS/WebKit (largely SOLVED — `withCompression('none')`):** the everyday iOS failures were the SDK decompression bug (§8.5 / Bug 24), now fixed by disabling WS compression. **Revisit when on SDK ≥ 2.4.0** (then the flag can be dropped). Residual: the SDK still has no auto-reconnect, so a genuinely dropped socket (network loss / fully backgrounding mid-round) recovers only via the reload watchdogs, not instantly.
 - **`doodle-background.png` is ~6.9 MB** — compress / convert to WebP for faster first paint.
 - **Word selection** is `timestamp % pool.length` (not true RNG) but avoids repeats within a game via a used-words set.
 - **Supabase bucket is public** — fine for the hackathon; lock with RLS for production.
@@ -591,4 +632,4 @@ export const end_round = spacetimedb.reducer({ arg: round_timer_table.rowType },
 
 ---
 
-*Originally built 2026-05-31. Last updated 2026-06-03 — after the move to **host-driven scoring + server-side reveal** (host scores every drawing over live data, `record_score_for` reveals atomically when all are scored, 45s backstop), the **room-scoped player lookup** (`findPlayerInRoom`) that fixed stale-identity mis-attribution, the **server-clock speed bonus**, and the **iOS resilience** pass on `/play` (`isReady`-gated rendering, Supabase upload retry, reload watchdogs). Earlier: the procedure→reducer scoring re-architecture, configurable round duration, bigint/`.toString()` fixes, and the neo-brutalist UI reskin (Tailwind v4 + Fredoka/Inter + motion + confetti). Built with Claude (Sonnet 4.6 / Opus) via Claude Code.*
+*Originally built 2026-05-31. Last updated 2026-06-05 — current state: **host-driven scoring + server-side reveal**, **room-scoped player lookup** (`findPlayerInRoom`), **server-clock speed bonus**, the **iOS/WebKit fix** (`withCompression('none')` for SDK#5031 — the real cause of all the iPhone failures; drop on SDK ≥2.4.0), the **self-grade bonus** (10s grade window + `submit_guess`/`close_grading` + `guess` table; +100 within ±5), **Play Again** (`replay`/`replay_vote` + `offer_/vote_/resolve_replay`), and **PENDING placeholders + grace** so a late auto-submit isn't a hard 0. Earlier: procedure→reducer scoring re-architecture, configurable round duration, bigint/`.toString()` fixes, neo-brutalist UI reskin (Tailwind v4 + Fredoka/Inter + motion + confetti). Built with Claude (Sonnet 4.6 / Opus) via Claude Code.*
