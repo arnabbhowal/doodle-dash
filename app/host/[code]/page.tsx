@@ -9,6 +9,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import { reducers, tables, procedures } from '../../../src/module_bindings';
 import type { Drawing, Player } from '../../../src/module_bindings/types';
 import { selectPending, roundFullyScored } from '../../../lib/scoring';
+import { startLobbyMusic, stopLobbyMusic, playJoin, startCountdown, stopCountdown, COUNTDOWN_LEAD_SECS } from '../../../lib/sounds';
 import { BrutalButton } from '../../components/BrutalButton';
 import { BrutalCard } from '../../components/BrutalCard';
 import { CountUp } from '../../components/CountUp';
@@ -244,6 +245,40 @@ export default function HostPage() {
     };
     frame();
   }, [room?.status]);
+
+  // ── Sound: lobby music while the lobby is open ───────────────────────────────
+  useEffect(() => {
+    if (room?.status === 'lobby') {
+      startLobbyMusic();
+      return () => stopLobbyMusic();
+    }
+  }, [room?.status]);
+
+  // ── Sound: player-join chime when someone NEW joins the lobby ────────────────
+  // Seed the known set on the first lobby render so pre-existing players (e.g.
+  // after a host refresh) don't all chime; only genuine joins after that play.
+  const knownPlayerIds = useRef<Set<string>>(new Set());
+  const lobbyJoinSeeded = useRef(false);
+  useEffect(() => {
+    if (room?.status !== 'lobby') { lobbyJoinSeeded.current = false; return; }
+    const ids = new Set(players.map(p => p.playerId.toString()));
+    if (!lobbyJoinSeeded.current) { knownPlayerIds.current = ids; lobbyJoinSeeded.current = true; return; }
+    let joined = false;
+    for (const id of ids) if (!knownPlayerIds.current.has(id)) { joined = true; break; }
+    knownPlayerIds.current = ids;
+    if (joined) playJoin();
+  }, [players, room?.status]);
+
+  // ── Sound: countdown synced to the round timer's final seconds ───────────────
+  const countdownFired = useRef(false);
+  useEffect(() => { countdownFired.current = false; stopCountdown(); }, [currentRound?.roundId]);
+  useEffect(() => {
+    if (room?.status !== 'in_round') { stopCountdown(); countdownFired.current = false; return; }
+    if (!countdownFired.current && secondsLeft > 0 && secondsLeft <= COUNTDOWN_LEAD_SECS) {
+      countdownFired.current = true;
+      startCountdown();
+    }
+  }, [secondsLeft, room?.status]);
 
   // ── Host-driven scoring (reactive; the SERVER reveals) ────────────────────────
   // The host is the single coordinator. While the round is in 'scoring' it scores
