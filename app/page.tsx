@@ -47,16 +47,15 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen relative flex flex-col items-center justify-center gap-10 p-8 overflow-hidden bg-[var(--canvas)]">
-      {/* Interactive doodle field over the dark canvas; light overlay keeps text legible */}
+    <div className="min-h-screen relative flex flex-col items-center justify-center gap-10 p-8 overflow-hidden bg-white">
+      {/* Interactive doodle field over a white background */}
       <DoodleBackground className="absolute inset-0 z-0" />
-      <div className="absolute inset-0 z-0 bg-[var(--canvas)]/30 pointer-events-none" />
 
       <div className="relative z-10 text-center">
-        <h1 className="font-display font-black uppercase tracking-tight text-7xl sm:text-8xl text-white leading-none drop-shadow-[5px_5px_0_var(--magenta)]">
-          Doodle<span className="text-[var(--yellow)] drop-shadow-[5px_5px_0_var(--magenta)]">Dash</span>
+        <h1 className="font-display font-black uppercase tracking-tight text-7xl sm:text-8xl text-[#0E0E16] leading-none drop-shadow-[5px_5px_0_var(--magenta)]">
+          Doodle<span className="text-[var(--magenta)] drop-shadow-[5px_5px_0_#0E0E16]">Dash</span>
         </h1>
-        <p className="mt-5 text-xl font-display font-medium uppercase tracking-widest text-[var(--cyan)] drop-shadow-[2px_2px_0_#000]">
+        <p className="mt-5 text-xl font-display font-bold uppercase tracking-widest text-[#0E0E16]/70">
           Draw fast. Get roasted. Win.
         </p>
       </div>
