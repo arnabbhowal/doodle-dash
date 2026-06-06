@@ -17,7 +17,7 @@
 const SRC = {
   click: '/sounds/button-click-trim.m4a',
   join: '/sounds/player-join.m4a',
-  countdown: '/sounds/countdown.m4a',   // your original clip, faithful — scheduled to end at timer 0
+  countdown: '/sounds/countdown.mp3',   // 5s countdown — scheduled to end at timer 0
   lobby: '/sounds/lobby-music.m4a',
   drawing: '/sounds/while-drawing.m4a', // looping ambient while a player draws
   confetti: '/sounds/end-confetti.m4a',
@@ -35,12 +35,12 @@ const VOL = {
   trombone: 0.75,
 };
 
-// Countdown sync. Your clip counts "10"→"0" but spaced ~1.13s apart (the count
-// spans ~11.35s), so it runs slow vs the 1-second timer. We time-stretch it to
-// COUNTDOWN_RATE (pitch preserved) so the count fits exactly 10s — "10" lands at
-// 10s left and "0" at 0 — and start it COUNTDOWN_LEAD_MS before the deadline.
-export const COUNTDOWN_RATE = 1.135;
-export const COUNTDOWN_LEAD_MS = 10044;
+// Countdown sync. countdown.mp3 is a clean 5s countdown — beeps ~1s apart
+// (5/4/3/2) and a final tone over the last second. It's already 1 beep/second, so
+// no time-stretch (rate 1). Scheduled to start COUNTDOWN_LEAD_MS before the
+// deadline so the clip ends exactly at 0 (first beep ≈ 5s left).
+export const COUNTDOWN_RATE = 1.0;
+export const COUNTDOWN_LEAD_MS = 5060;
 
 const canPlay = () => typeof window !== 'undefined' && typeof Audio !== 'undefined';
 
