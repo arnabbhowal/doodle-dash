@@ -9,7 +9,7 @@ import { uploadDrawing, uploadHijackCanvas } from '../../../lib/supabase';
 import { BrutalButton } from '../../components/BrutalButton';
 import { BrutalCard } from '../../components/BrutalCard';
 import { CountUp } from '../../components/CountUp';
-import { startDrawingMusic, stopDrawingMusic, duckDrawingMusic, startCountdown, stopCountdown, playConfetti, playTrombone, COUNTDOWN_CLIP_MS } from '../../../lib/sounds';
+import { startDrawingMusic, stopDrawingMusic, duckDrawingMusic, startCountdown, stopCountdown, playConfetti, playTrombone, COUNTDOWN_LEAD_MS } from '../../../lib/sounds';
 
 const COLORS = [
   '#000000','#6b7280','#ffffff','#8b5e34',          // black, gray, white, brown
@@ -540,8 +540,8 @@ export default function PlayPage() {
     duckDrawingMusic(false);
     if (room?.status !== 'in_round' || !currentRound || alreadySubmitted) return;
     const endsMs = Number(currentRound.endsAt.microsSinceUnixEpoch / 1000n);
-    const delay = endsMs - COUNTDOWN_CLIP_MS - Date.now();
-    if (delay <= -COUNTDOWN_CLIP_MS) return; // already past the countdown window
+    const delay = endsMs - COUNTDOWN_LEAD_MS - Date.now();
+    if (delay <= -COUNTDOWN_LEAD_MS) return; // already past the countdown window
     const t = setTimeout(() => { startCountdown(); duckDrawingMusic(true); }, Math.max(0, delay));
     return () => { clearTimeout(t); stopCountdown(); duckDrawingMusic(false); };
   }, [room?.status, currentRound?.roundId, alreadySubmitted]);

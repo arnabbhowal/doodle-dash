@@ -9,7 +9,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import { reducers, tables, procedures } from '../../../src/module_bindings';
 import type { Drawing, Player } from '../../../src/module_bindings/types';
 import { selectPending, roundFullyScored } from '../../../lib/scoring';
-import { startLobbyMusic, stopLobbyMusic, playJoin, startCountdown, stopCountdown, playConfetti, COUNTDOWN_CLIP_MS } from '../../../lib/sounds';
+import { startLobbyMusic, stopLobbyMusic, playJoin, startCountdown, stopCountdown, playConfetti, COUNTDOWN_LEAD_MS } from '../../../lib/sounds';
 import { BrutalButton } from '../../components/BrutalButton';
 import { BrutalCard } from '../../components/BrutalCard';
 import { CountUp } from '../../components/CountUp';
@@ -277,8 +277,8 @@ export default function HostPage() {
     stopCountdown();
     if (room?.status !== 'in_round' || !currentRound) return;
     const endsMs = Number(currentRound.endsAt.microsSinceUnixEpoch / 1000n);
-    const delay = endsMs - COUNTDOWN_CLIP_MS - Date.now();
-    if (delay <= -COUNTDOWN_CLIP_MS) return; // already past the countdown window
+    const delay = endsMs - COUNTDOWN_LEAD_MS - Date.now();
+    if (delay <= -COUNTDOWN_LEAD_MS) return; // already past the countdown window
     const t = setTimeout(() => startCountdown(), Math.max(0, delay));
     return () => { clearTimeout(t); stopCountdown(); };
   }, [room?.status, currentRound?.roundId]);

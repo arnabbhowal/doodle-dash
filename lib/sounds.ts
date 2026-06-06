@@ -35,9 +35,12 @@ const VOL = {
   trombone: 0.75,
 };
 
-// The countdown clip length in ms (your original ~12.58s clip, untouched);
-// callers schedule it to start this long before the deadline so it ends at 0.
-export const COUNTDOWN_CLIP_MS = 12576;
+// Countdown sync. Your clip counts "10"→"0" but spaced ~1.13s apart (the count
+// spans ~11.35s), so it runs slow vs the 1-second timer. We time-stretch it to
+// COUNTDOWN_RATE (pitch preserved) so the count fits exactly 10s — "10" lands at
+// 10s left and "0" at 0 — and start it COUNTDOWN_LEAD_MS before the deadline.
+export const COUNTDOWN_RATE = 1.135;
+export const COUNTDOWN_LEAD_MS = 10044;
 
 const canPlay = () => typeof window !== 'undefined' && typeof Audio !== 'undefined';
 
@@ -148,6 +151,10 @@ export function startCountdown() {
   try {
     countdown = new Audio(SRC.countdown);
     countdown.volume = VOL.countdown;
+    // Time-stretch so the spoken count matches the timer 1:1 (pitch preserved).
+    countdown.preservesPitch = true;
+    (countdown as unknown as { webkitPreservesPitch?: boolean }).webkitPreservesPitch = true;
+    countdown.playbackRate = COUNTDOWN_RATE;
     countdown.addEventListener('ended', () => { countdown = null; });
     void countdown.play().catch(() => {});
   } catch {
