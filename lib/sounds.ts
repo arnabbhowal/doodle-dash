@@ -7,16 +7,17 @@
 // The click uses the Web Audio API (decoded once into a buffer, fired via a
 // buffer-source node) so it plays with ~no latency and overlaps cleanly. Audio
 // unlocks + preloads on the first pointer/key interaction. Everything else uses
-// HTMLAudio: the lobby + while-drawing tracks loop; the countdown is a 5s clip
-// scheduled to END exactly when the timer hits 0; confetti/trombone are one-shots.
+// HTMLAudio: the lobby + while-drawing tracks loop; the countdown is your
+// original clip scheduled to END exactly when the timer hits 0; confetti/
+// trombone are one-shots.
 //
-// Source clips were trimmed to their meaningful region (see the *-trim work in
-// public/sounds): countdown = final 5.0s, while-drawing = 138s seamless loop.
+// The countdown + player-join are your original .wav files transcoded faithfully
+// to m4a via afconvert (no sample surgery); while-drawing is a 138s seamless loop.
 
 const SRC = {
   click: '/sounds/button-click-trim.m4a',
   join: '/sounds/player-join.m4a',
-  countdown: '/sounds/countdown.m4a',   // 5.0s — scheduled to end at timer 0
+  countdown: '/sounds/countdown.m4a',   // your original clip, faithful — scheduled to end at timer 0
   lobby: '/sounds/lobby-music.m4a',
   drawing: '/sounds/while-drawing.m4a', // looping ambient while a player draws
   confetti: '/sounds/end-confetti.m4a',
@@ -26,7 +27,7 @@ const SRC = {
 const VOL = {
   click: 0.4,
   join: 0.6,
-  countdown: 0.6,
+  countdown: 0.85,
   lobby: 0.25,
   drawing: 0.32,      // normal while-drawing volume
   drawingDuck: 0.1,   // ducked while the countdown plays
@@ -34,9 +35,9 @@ const VOL = {
   trombone: 0.75,
 };
 
-// The countdown clip is 5.0s; callers schedule it to start this long before the
-// round deadline so it finishes exactly at 0.
-export const COUNTDOWN_CLIP_MS = 5000;
+// The countdown clip length in ms (your original ~12.58s clip, untouched);
+// callers schedule it to start this long before the deadline so it ends at 0.
+export const COUNTDOWN_CLIP_MS = 12576;
 
 const canPlay = () => typeof window !== 'undefined' && typeof Audio !== 'undefined';
 
