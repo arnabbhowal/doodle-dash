@@ -270,15 +270,18 @@ export default function HostPage() {
   }, [players, room?.status]);
 
   // ── Sound: countdown synced to the round timer's final seconds ───────────────
+  // Driven by the secondsLeft tick, but the decision reads the LIVE deadline so a
+  // stale leftover secondsLeft at the start of round 2+ can't fire it early.
   const countdownFired = useRef(false);
   useEffect(() => { countdownFired.current = false; stopCountdown(); }, [currentRound?.roundId]);
   useEffect(() => {
-    if (room?.status !== 'in_round') { stopCountdown(); countdownFired.current = false; return; }
-    if (!countdownFired.current && secondsLeft > 0 && secondsLeft <= COUNTDOWN_LEAD_SECS) {
+    if (room?.status !== 'in_round' || !currentRound) { stopCountdown(); countdownFired.current = false; return; }
+    const remain = Math.max(0, Math.ceil((Number(currentRound.endsAt.microsSinceUnixEpoch / 1000n) - Date.now()) / 1000));
+    if (!countdownFired.current && remain > 0 && remain <= COUNTDOWN_LEAD_SECS) {
       countdownFired.current = true;
       startCountdown();
     }
-  }, [secondsLeft, room?.status]);
+  }, [secondsLeft, room?.status, currentRound?.roundId]);
 
   // ── Host-driven scoring (reactive; the SERVER reveals) ────────────────────────
   // The host is the single coordinator. While the round is in 'scoring' it scores

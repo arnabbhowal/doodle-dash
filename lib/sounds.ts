@@ -1,26 +1,25 @@
 // Client-side sound effects + music for DoodleDash.
 //
 // All playback is browser-only and guarded with `canPlay()`, so this module is
-// safe to import from components that also render on the server. Volumes and the
-// one-shot caps are plain constants so they're easy to tweak by ear.
+// safe to import from components that also render on the server. Volumes are
+// plain constants so they're easy to tweak by ear.
 //
-// On "trimming": the source one-shots (button-click ~6.8s, player-join ~5s) have
-// long tails. Rather than re-encode them we just play the meaningful HEAD of the
-// clip and pause at CAP_MS. If a sound's content isn't at the very start, bump
-// the matching CAP_MS. The countdown (~5.1s) plays in full, synced to the timer;
-// the lobby track loops.
+// The source one-shots had long leading silence / multiple takes (the raw
+// button-click had its first click at 0.75s, so a naive play was inaudible), so
+// button-click and player-join are pre-trimmed to a single clean hit (the *-trim
+// .m4a files in public/sounds). The countdown (~5.1s of per-second ticks) plays
+// in full, synced to the timer; the lobby track loops.
 
 type OneShot = 'click' | 'join';
 
 const SRC = {
-  click: '/sounds/button-click.mp3',
-  join: '/sounds/player-join.mp3',
+  click: '/sounds/button-click-trim.m4a', // trimmed to one ~0.3s click
+  join: '/sounds/player-join-trim.m4a',   // trimmed to the ~1s chime (no lead-in lag)
   countdown: '/sounds/countdown.mp3',
-  lobby: '/sounds/lobby-music.m4a', // AAC: plays on Safari + Chrome + Firefox
+  lobby: '/sounds/lobby-music.m4a',        // AAC: plays on Safari + Chrome + Firefox
 };
 
-const CAP_MS: Record<OneShot, number> = { click: 350, join: 1500 };
-const VOL = { click: 0.35, join: 0.6, countdown: 0.5, lobby: 0.25 };
+const VOL = { click: 0.4, join: 0.6, countdown: 0.55, lobby: 0.25 };
 
 // The countdown clip is ~5.1s; start it when this many seconds remain so it
 // finishes around 0. The host syncs the trigger to its round timer.
@@ -34,8 +33,6 @@ function playOneShot(key: OneShot) {
     const a = new Audio(SRC[key]);
     a.volume = VOL[key];
     void a.play().catch(() => {}); // autoplay can reject before a user gesture
-    const cap = CAP_MS[key];
-    if (cap) window.setTimeout(() => { try { a.pause(); } catch {} }, cap);
   } catch {
     /* ignore */
   }
