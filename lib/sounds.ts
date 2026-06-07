@@ -1,162 +1,141 @@
-// Client-side sound effects + music for DoodleDash.
+// Client-side sound for DoodleDash — all via the Web Audio API.
 //
-// All playback is browser-only and guarded with `canPlay()`, so this module is
-// safe to import from components that also render on the server. Volumes are
-// plain constants so they're easy to tweak by ear.
-//
-// Clicks (normal + back) use the Web Audio API (decoded once into buffers, fired
-// via buffer-source nodes) so they play with ~no latency and overlap cleanly.
-// Audio unlocks + preloads on the first pointer/key interaction. The lobby +
-// while-drawing tracks loop; the countdown is a 5s clip scheduled to END exactly
-// when the timer hits 0; victory + confetti-gun are end-of-game one-shots.
+// iOS Safari blocks `new Audio().play()` outside a user gesture, which made
+// scheduled/auto sounds (countdown, join, victory, loops) fire unreliably. So
+// EVERYTHING goes through a single AudioContext unlocked + preloaded on the first
+// pointer/key interaction; after that, buffers play anytime (no per-play gesture).
+// decodeAudioData handles m4a (AAC) and mp3 on all target browsers.
 
-const SRC = {
+const SRC: Record<string, string> = {
   click: '/sounds/button-click-trim.m4a',
   back: '/sounds/back-button-click.m4a',
   join: '/sounds/player-join.m4a',
-  countdown: '/sounds/countdown.mp3',   // 5s countdown — scheduled to end at timer 0
+  countdown: '/sounds/countdown.mp3',
   lobby: '/sounds/lobby-music.m4a',
-  drawing: '/sounds/while-drawing.m4a', // looping ambient while a player draws
+  drawing: '/sounds/while-drawing.m4a',
   victory: '/sounds/victory.m4a',
   confettiGun: '/sounds/confetti-gun.m4a',
 };
 
-const VOL = {
-  click: 0.4,
-  back: 0.5,
-  join: 0.6,
-  countdown: 0.85,
-  lobby: 0.25,
-  drawing: 0.3,
-  victory: 0.8,
-  confettiGun: 0.7,
+const VOL: Record<string, number> = {
+  click: 0.4, back: 0.5, join: 0.6, countdown: 0.85,
+  lobby: 0.25, drawing: 0.3, victory: 0.8, confettiGun: 0.7,
 };
 
-// Countdown sync. countdown.mp3 is a clean 5s countdown (1 beep/second), so no
-// time-stretch (rate 1). Scheduled to start COUNTDOWN_LEAD_MS before the deadline
-// so the clip ends exactly at 0 (first beep ≈ 5s left).
 export const COUNTDOWN_RATE = 1.0;
 export const COUNTDOWN_LEAD_MS = 5060;
 
-const canPlay = () => typeof window !== 'undefined' && typeof Audio !== 'undefined';
-
-// ── Low-latency clicks via Web Audio (decoded once into buffers) ──────────────
-type BufKey = 'click' | 'back';
-let audioCtx: AudioContext | null = null;
-const buffers: Partial<Record<BufKey, AudioBuffer>> = {};
+let ctx: AudioContext | null = null;
+const buffers: Record<string, AudioBuffer | undefined> = {};
+const loading: Record<string, boolean> = {};
 
 function getCtx(): AudioContext | null {
   if (typeof window === 'undefined') return null;
-  if (!audioCtx) {
+  if (!ctx) {
     const AC = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!AC) return null;
-    try { audioCtx = new AC(); } catch { return null; }
+    try { ctx = new AC(); } catch { return null; }
   }
-  return audioCtx;
+  return ctx;
 }
-
-function preloadBuffer(key: BufKey) {
-  const ctx = getCtx();
-  if (!ctx || buffers[key]) return;
+function ensure(): AudioContext | null {
+  const c = getCtx();
+  if (c && c.state === 'suspended') void c.resume().catch(() => {});
+  return c;
+}
+function load(key: string) {
+  const c = getCtx();
+  if (!c || buffers[key] || loading[key]) return;
+  loading[key] = true;
   fetch(SRC[key])
     .then(r => r.arrayBuffer())
-    .then(a => ctx.decodeAudioData(a))
-    .then(buf => { buffers[key] = buf; })
-    .catch(() => { /* fall back to HTMLAudio */ });
+    .then(a => c.decodeAudioData(a))
+    .then(b => { buffers[key] = b; })
+    .catch(() => {})
+    .finally(() => { loading[key] = false; });
 }
 
 if (typeof window !== 'undefined') {
-  const init = () => {
-    const ctx = getCtx();
-    if (ctx && ctx.state === 'suspended') void ctx.resume().catch(() => {});
-    preloadBuffer('click');
-    preloadBuffer('back');
-  };
+  const init = () => { ensure(); Object.keys(SRC).forEach(load); };
   window.addEventListener('pointerdown', init, { once: true, capture: true });
   window.addEventListener('keydown', init, { once: true, capture: true });
 }
 
-function playBuffered(key: BufKey, volume: number) {
-  const ctx = getCtx();
-  if (ctx && buffers[key]) {
+function playOne(key: string) {
+  const c = ensure();
+  if (!c) return;
+  const b = buffers[key];
+  if (!b) { load(key); return; }
+  try {
+    const s = c.createBufferSource();
+    s.buffer = b;
+    const g = c.createGain();
+    g.gain.value = VOL[key];
+    s.connect(g).connect(c.destination);
+    s.start();
+  } catch { /* ignore */ }
+}
+
+export const playClick = () => playOne('click');
+export const playBack = () => playOne('back');
+export const playJoin = () => playOne('join');
+export const playVictory = () => playOne('victory');
+export const playConfettiGun = () => playOne('confettiGun');
+
+// Looping track (lobby, while-drawing). Waits for the buffer to decode, and a
+// stop() before then cancels the pending start.
+function makeLooper(key: string) {
+  let node: AudioBufferSourceNode | null = null;
+  let wanted = false;
+  const begin = () => {
+    if (!wanted || node) return;
+    const c = ensure();
+    if (!c) return;
+    const b = buffers[key];
+    if (!b) { load(key); setTimeout(begin, 150); return; }
     try {
-      if (ctx.state === 'suspended') void ctx.resume().catch(() => {});
-      const src = ctx.createBufferSource();
-      src.buffer = buffers[key]!;
-      const gain = ctx.createGain();
-      gain.gain.value = volume;
-      src.connect(gain).connect(ctx.destination);
-      src.start();
-      return;
-    } catch { /* fall through to HTMLAudio */ }
-  }
-  if (ctx && !buffers[key]) preloadBuffer(key);
-  if (!canPlay()) return;
-  try {
-    const a = new Audio(SRC[key]);
-    a.volume = volume;
-    void a.play().catch(() => {});
-  } catch { /* ignore */ }
+      const s = c.createBufferSource();
+      s.buffer = b;
+      s.loop = true;
+      const g = c.createGain();
+      g.gain.value = VOL[key];
+      s.connect(g).connect(c.destination);
+      s.start();
+      node = s;
+    } catch { /* ignore */ }
+  };
+  return {
+    start() { wanted = true; begin(); },
+    stop() { wanted = false; if (node) { try { node.stop(); } catch {} node = null; } },
+  };
 }
+const lobby = makeLooper('lobby');
+const drawing = makeLooper('drawing');
+export const startLobbyMusic = lobby.start;
+export const stopLobbyMusic = lobby.stop;
+export const startDrawingMusic = drawing.start;
+export const stopDrawingMusic = drawing.stop;
 
-export const playClick = () => playBuffered('click', VOL.click);
-export const playBack = () => playBuffered('back', VOL.back);
-
-// ── One-shots (latency not critical) ──────────────────────────────────────────
-function oneShot(src: string, volume: number) {
-  if (!canPlay()) return;
-  try {
-    const a = new Audio(src);
-    a.volume = volume;
-    void a.play().catch(() => {});
-  } catch { /* ignore */ }
-}
-export const playJoin = () => oneShot(SRC.join, VOL.join);
-export const playVictory = () => oneShot(SRC.victory, VOL.victory);
-export const playConfettiGun = () => oneShot(SRC.confettiGun, VOL.confettiGun);
-
-// ── Looping singletons (lobby music, while-drawing ambient) ───────────────────
-function makeLoop(src: string, volume: number): HTMLAudioElement | null {
-  if (!canPlay()) return null;
-  try {
-    const a = new Audio(src);
-    a.loop = true;
-    a.volume = volume;
-    void a.play().catch(() => {});
-    return a;
-  } catch {
-    return null;
-  }
-}
-
-let lobby: HTMLAudioElement | null = null;
-export function startLobbyMusic() { if (!lobby) lobby = makeLoop(SRC.lobby, VOL.lobby); }
-export function stopLobbyMusic() {
-  if (lobby) { try { lobby.pause(); } catch { /* ignore */ } lobby = null; }
-}
-
-let drawing: HTMLAudioElement | null = null;
-export function startDrawingMusic() { if (!drawing) drawing = makeLoop(SRC.drawing, VOL.drawing); }
-export function stopDrawingMusic() {
-  if (drawing) { try { drawing.pause(); } catch { /* ignore */ } drawing = null; }
-}
-
-// ── Countdown (one-shot, scheduled by the caller to end at the timer's 0) ──────
-let countdown: HTMLAudioElement | null = null;
+// Countdown — one-shot, scheduled by the caller to end at the timer's 0.
+let cdNode: AudioBufferSourceNode | null = null;
 export function startCountdown() {
-  if (!canPlay() || countdown) return;
+  if (cdNode) return;
+  const c = ensure();
+  if (!c) return;
+  const b = buffers.countdown;
+  if (!b) { load('countdown'); return; }
   try {
-    countdown = new Audio(SRC.countdown);
-    countdown.volume = VOL.countdown;
-    countdown.preservesPitch = true;
-    (countdown as unknown as { webkitPreservesPitch?: boolean }).webkitPreservesPitch = true;
-    countdown.playbackRate = COUNTDOWN_RATE;
-    countdown.addEventListener('ended', () => { countdown = null; });
-    void countdown.play().catch(() => {});
-  } catch {
-    /* ignore */
-  }
+    const s = c.createBufferSource();
+    s.buffer = b;
+    s.playbackRate.value = COUNTDOWN_RATE;
+    const g = c.createGain();
+    g.gain.value = VOL.countdown;
+    s.connect(g).connect(c.destination);
+    s.onended = () => { cdNode = null; };
+    s.start();
+    cdNode = s;
+  } catch { /* ignore */ }
 }
 export function stopCountdown() {
-  if (countdown) { try { countdown.pause(); } catch { /* ignore */ } countdown = null; }
+  if (cdNode) { try { cdNode.stop(); } catch {} cdNode = null; }
 }
