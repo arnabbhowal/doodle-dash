@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'motion/react';
 import { useReducer } from 'spacetimedb/react';
@@ -33,6 +33,7 @@ export default function Home() {
   const [joinCode, setJoinCode] = useState('');
   const [creating, setCreating] = useState(false);
   const [showHowTo, setShowHowTo] = useState(false);
+  const titleRef = useRef<HTMLDivElement>(null);
 
   const handleCreate = () => {
     const code = randomCode();
@@ -50,9 +51,9 @@ export default function Home() {
   return (
     <div className="min-h-screen relative flex flex-col items-center justify-center gap-10 p-8 overflow-hidden bg-white">
       {/* Interactive doodle field over a white background */}
-      <DoodleBackground className="absolute inset-0 z-0" />
+      <DoodleBackground className="absolute inset-0 z-0" excludeRef={titleRef} />
 
-      <div className="relative z-10 text-center bg-white/85 backdrop-blur-md rounded-[32px] px-8 py-6">
+      <div ref={titleRef} className="relative z-10 text-center bg-white/85 backdrop-blur-md rounded-[32px] px-8 py-6">
         <h1 className="font-display font-black uppercase tracking-tight text-7xl sm:text-8xl text-[#0E0E16] leading-none drop-shadow-[5px_5px_0_var(--magenta)]">
           Doodle<span className="text-[var(--magenta)] drop-shadow-[5px_5px_0_#0E0E16]">Dash</span>
         </h1>

@@ -41,7 +41,7 @@ interface Particle {
   img: HTMLImageElement;
 }
 
-export function DoodleBackground({ className }: { className?: string }) {
+export function DoodleBackground({ className, excludeRef }: { className?: string; excludeRef?: { current: HTMLElement | null } }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -182,6 +182,24 @@ export function DoodleBackground({ className }: { className?: string }) {
         else if (p.x > W - hw) { p.x = W - hw; p.vx = -Math.abs(p.vx); p.pvx = -Math.abs(p.pvx); }
         if (p.y < hh) { p.y = hh; p.vy = Math.abs(p.vy); p.pvy = Math.abs(p.pvy); }
         else if (p.y > H - hh) { p.y = H - hh; p.vy = -Math.abs(p.vy); p.pvy = -Math.abs(p.pvy); }
+      }
+
+      // 3b. Keep doodles OUT of the title panel — bounce them around it.
+      const ex = excludeRef?.current?.getBoundingClientRect();
+      if (ex && ex.width > 0) {
+        for (const p of particles) {
+          const hw = (p.img.naturalWidth || 175) * p.scale * 0.5;
+          const hh = (p.img.naturalHeight || 171) * p.scale * 0.5;
+          const L = ex.left - hw, R = ex.right + hw, T = ex.top - hh, B = ex.bottom + hh;
+          if (p.x > L && p.x < R && p.y > T && p.y < B) {
+            const dl = p.x - L, dr = R - p.x, dt = p.y - T, db = B - p.y;
+            const m = Math.min(dl, dr, dt, db);
+            if (m === dl) { p.x = L; p.vx = -Math.abs(p.vx); p.pvx = -Math.abs(p.pvx); }
+            else if (m === dr) { p.x = R; p.vx = Math.abs(p.vx); p.pvx = Math.abs(p.pvx); }
+            else if (m === dt) { p.y = T; p.vy = -Math.abs(p.vy); p.pvy = -Math.abs(p.pvy); }
+            else { p.y = B; p.vy = Math.abs(p.vy); p.pvy = Math.abs(p.pvy); }
+          }
+        }
       }
 
       // 4. Draw.
