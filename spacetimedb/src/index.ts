@@ -18,10 +18,9 @@ const END_GRACE_MICROS = 25_000_000n; // must exceed GRADE_WINDOW + host scoring
 // show the countdown). The speed bonus is only ever computed during 'drawing', so this
 // reuse doesn't affect scoring.
 const GRADE_WINDOW_MICROS = 10_000_000n;
-// Board Hijack sabotage: how long the attacker controls the victim's canvas. The
-// attacker streams pen strokes (hijack_draw) that the victim renders live. Fixed at
-// 10s regardless of round duration (server validates each stroke is inside this window).
-const HIJACK_DURATION_MICROS = 10_000_000n;
+// Board Hijack sabotage lasts round_duration_secs / 6 → 5s/10s/15s/20s for
+// 30/60/90/120s rounds; computed per-call from the room. Server validates each
+// hijack stroke is inside this window.
 const MAX_PLAYERS = 16;
 // Update this if needed — docs show gemini-2.5-flash as current (May 2026)
 const GEMINI_MODEL = 'gemini-2.5-flash';
@@ -785,6 +784,8 @@ export const hijack_draw = spacetimedb.reducer(
     const callerIdStr = caller.player_id.toString();
     const callerIsVictim = callerIdStr === victimId.toString();
     const nowMicros = ctx.timestamp.microsSinceUnixEpoch as bigint;
+    const roomHD = ctx.db.room.room_id.find(round.room_id);
+    const hijMicros = BigInt(Math.floor((roomHD?.round_duration_secs ?? 60) / 6)) * 1_000_000n;
 
     // The board exists only while ≥1 active hijack targets the victim. The victim may
     // draw on it freely; an attacker must own one of those sabotages.
@@ -792,7 +793,7 @@ export const hijack_draw = spacetimedb.reducer(
     for (const s of ctx.db.sabotage.to_player_id.filter(victimId)) {
       const ss = s as any;
       if (!(ss.active && ss.effect === 'hijack' && ss.round_id.toString() === roundIdStr &&
-            nowMicros <= (ss.created_at.microsSinceUnixEpoch as bigint) + HIJACK_DURATION_MICROS)) continue;
+            nowMicros <= (ss.created_at.microsSinceUnixEpoch as bigint) + hijMicros)) continue;
       if (callerIsVictim || ss.from_player_id.toString() === callerIdStr) { authorized = true; break; }
     }
     if (!authorized) return;
@@ -825,12 +826,14 @@ export const set_hijack_canvas = spacetimedb.reducer(
 
     const roundIdStr = roundId.toString();
     const nowMicros = ctx.timestamp.microsSinceUnixEpoch as bigint;
+    const roomHC = ctx.db.room.room_id.find(round.room_id);
+    const hijMicros = BigInt(Math.floor((roomHC?.round_duration_secs ?? 60) / 6)) * 1_000_000n;
     let targeted = false;
     for (const s of ctx.db.sabotage.to_player_id.filter(victim.player_id)) {
       const ss = s as any;
       if (ss.active && ss.effect === 'hijack' &&
           ss.round_id.toString() === roundIdStr &&
-          nowMicros <= (ss.created_at.microsSinceUnixEpoch as bigint) + HIJACK_DURATION_MICROS) {
+          nowMicros <= (ss.created_at.microsSinceUnixEpoch as bigint) + hijMicros) {
         targeted = true;
         break;
       }

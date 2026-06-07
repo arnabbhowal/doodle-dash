@@ -61,7 +61,7 @@ export default function JoinPage() {
             value={nickname}
             onChange={e => setNickname(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && handleJoin()}
-            maxLength={14}
+            maxLength={10}
             autoFocus
             className="w-full border-4 border-black bg-[var(--surface)] rounded-2xl p-4 text-xl font-display font-bold text-white shadow-[4px_4px_0_0_#000] focus:outline-none focus:border-[var(--magenta)]"
           />

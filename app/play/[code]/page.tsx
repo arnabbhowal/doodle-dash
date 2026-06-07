@@ -27,7 +27,7 @@ const EFFECT_LABELS: Record<string, string> = {
 // a pad; batches of normalized points stream through the hijack_draw reducer; the
 // victim replays them onto its canvas live. Both can draw at once — pure chaos.
 const HIJACK_MS = 10000;
-const HIJACK_SIZE_FRAC = 0.045;            // brush size as a fraction of the canvas short side
+const HIJACK_SIZE_FRAC = 0.028;            // brush size as a fraction of the canvas short side
 const HIJACK_COLORS = ['#000000', '#ef4444', '#3b82f6']; // attacker's vandal palette
 
 // Render one streamed batch of hijack points onto a canvas. Points are [nx, ny, down]
@@ -196,6 +196,8 @@ export default function PlayPage() {
   const [rooms]    = useTable(tables.room.where(r => r.code.eq(code)));
   const room       = rooms[0];
   const roomId     = room?.roomId;
+  // Hijack lasts round_duration/6 → 5s/10s/15s/20s for 30/60/90/120s rounds.
+  const hijackMs   = Math.floor((room?.roundDurationSecs ?? 60) / 6) * 1000;
 
   // useTable returns [rows, isReady]. We MUST gate on isReady: rendering before a
   // subscription finishes its initial sync makes `drawings`/`players` momentarily
@@ -260,7 +262,7 @@ export default function PlayPage() {
     const id = setInterval(() => setNowMs(Date.now()), 500);
     return () => clearInterval(id);
   }, []);
-  const sabotageLifetimeMs = HIJACK_MS; // hijack lasts a fixed 10s
+  const sabotageLifetimeMs = hijackMs; // hijack scales with round duration (dur/6)
   const activeSabotages = mySabotages.filter(s => {
     if (!s.active) return false;
     const createdMs = Number(s.createdAt.microsSinceUnixEpoch / 1000n);
@@ -750,7 +752,7 @@ export default function PlayPage() {
       hijackDraw({ roundId, toPlayerId: hijackVictimId, seq: hijackSeqRef.current, pts: JSON.stringify(batch), color: hijackColorRef.current, size: HIJACK_SIZE_FRAC });
     };
     const flushId = setInterval(send, 90);
-    const endId = setTimeout(() => { send(); setHijackActive(false); }, HIJACK_MS);
+    const endId = setTimeout(() => { send(); setHijackActive(false); }, hijackMs);
     return () => { clearInterval(flushId); clearTimeout(endId); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hijackActive, hijackVictimId, currentRound?.roundId]);
@@ -1199,7 +1201,7 @@ export default function PlayPage() {
                         // Open the local hijack pad immediately + spend the sabotage; the
                         // stream/flush effect starts sending strokes to the victim.
                         setHijackVictimId(sabotageTarget);
-                        setHijackUntil(Date.now() + HIJACK_MS);
+                        setHijackUntil(Date.now() + hijackMs);
                         setHijackActive(true);
                         useSabotage({ roundId: currentRound.roundId, targetPlayerId: sabotageTarget, effect: 'hijack' });
                       }}>
