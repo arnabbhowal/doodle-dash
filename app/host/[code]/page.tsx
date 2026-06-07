@@ -59,7 +59,7 @@ function hexToRgb(hex: string): [number, number, number] {
 // anti-aliased edges, like the player-side fill.
 function hostFloodFill(ctx: CanvasRenderingContext2D, sx: number, sy: number, hex: string) {
   const w = ctx.canvas.width, h = ctx.canvas.height;
-  if (sx < 0 || sy < 0 || sx >= w || sy >= h) return;
+  if (!Number.isFinite(sx) || !Number.isFinite(sy) || sx < 0 || sy < 0 || sx >= w || sy >= h) return;
   const img = ctx.getImageData(0, 0, w, h);
   const data = img.data;
   const s = (sy * w + sx) * 4;
@@ -218,7 +218,7 @@ export default function HostPage() {
       .filter(s => s.playerId === peekPlayer.playerId)
       .sort((a, b) => a.seq - b.seq)
       .map(s => ({ seq: s.seq, pts: s.pts, color: s.color, size: s.size }));
-    renderPeekStrokes(canvas, strokes);
+    try { renderPeekStrokes(canvas, strokes); } catch (e) { console.warn('[peek] render failed', e); }
   }, [spectateActive, room?.status, peekPlayer?.playerId, peekStrokes]);
 
   // Self-grade window countdown (ends_at is repurposed as the grade deadline during
