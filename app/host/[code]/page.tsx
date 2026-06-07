@@ -517,7 +517,7 @@ export default function HostPage() {
               onClick={() => room && startGame({ roomId: room.roomId, totalRounds, wordSource, customWords, roundDuration })}
               className="w-full whitespace-normal leading-tight text-center !py-5 mt-1"
             >
-              {players.length < 2 ? `Need ${2 - players.length} more player…` : '▶ Start Game'}
+              {players.length < 2 ? `Need ${2 - players.length} more player${2 - players.length === 1 ? '' : 's'}…` : '▶ Start Game'}
             </BrutalButton>
           </BrutalCard>
         </div>

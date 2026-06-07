@@ -8,6 +8,7 @@ import { reducers } from '../src/module_bindings';
 import { BrutalButton } from './components/BrutalButton';
 import { BrutalCard } from './components/BrutalCard';
 import { DoodleBackground } from './components/DoodleBackground';
+import { playBack } from '../lib/sounds';
 
 function randomCode() {
   return Math.random().toString(36).slice(2, 8).toUpperCase();
@@ -51,7 +52,7 @@ export default function Home() {
       {/* Interactive doodle field over a white background */}
       <DoodleBackground className="absolute inset-0 z-0" />
 
-      <div className="relative z-10 text-center">
+      <div className="relative z-10 text-center bg-white/85 backdrop-blur-md rounded-[32px] px-8 py-6">
         <h1 className="font-display font-black uppercase tracking-tight text-7xl sm:text-8xl text-[#0E0E16] leading-none drop-shadow-[5px_5px_0_var(--magenta)]">
           Doodle<span className="text-[var(--magenta)] drop-shadow-[5px_5px_0_#0E0E16]">Dash</span>
         </h1>
@@ -113,7 +114,7 @@ export default function Home() {
               onClick={(e) => e.stopPropagation()}
             >
               <button
-                onClick={() => setShowHowTo(false)}
+                onClick={() => { playBack(); setShowHowTo(false); }}
                 aria-label="Close"
                 className="absolute top-4 right-4 w-9 h-9 rounded-full border-[3px] border-black bg-[var(--red)] text-white font-display font-black shadow-[2px_2px_0_0_#000] flex items-center justify-center hover:scale-110 active:scale-95 transition-transform"
               >
