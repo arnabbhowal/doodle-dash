@@ -9,7 +9,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import { reducers, tables, procedures } from '../../../src/module_bindings';
 import type { Drawing, Player } from '../../../src/module_bindings/types';
 import { selectPending, roundFullyScored } from '../../../lib/scoring';
-import { startLobbyMusic, stopLobbyMusic, playJoin, startCountdown, stopCountdown, COUNTDOWN_LEAD_MS } from '../../../lib/sounds';
+import { startLobbyMusic, stopLobbyMusic, playJoin, startCountdown, stopCountdown, playVictory, playConfettiGun, COUNTDOWN_LEAD_MS } from '../../../lib/sounds';
 import { BrutalButton } from '../../components/BrutalButton';
 import { BrutalCard } from '../../components/BrutalCard';
 import { CountUp } from '../../components/CountUp';
@@ -236,6 +236,8 @@ export default function HostPage() {
   // Confetti celebration when the game finishes (presentation only)
   useEffect(() => {
     if (room?.status !== 'finished') return;
+    playVictory();
+    playConfettiGun();
     const end = Date.now() + 2500;
     const colors = ['#FF2E88', '#FFD60A', '#00E08A', '#19D3FF'];
     const frame = () => {
@@ -413,7 +415,7 @@ export default function HostPage() {
   if (room.status === 'lobby') {
     return (
       <div className="min-h-screen flex items-center justify-center p-4 sm:p-8 pt-20 sm:pt-8 relative">
-       <BrutalButton color="surface" size="sm" onClick={() => router.push('/')} className="absolute top-4 left-4 sm:top-6 sm:left-6 z-10">
+       <BrutalButton color="surface" size="sm" sound="back" onClick={() => router.push('/')} className="absolute top-4 left-4 sm:top-6 sm:left-6 z-10">
          Back
        </BrutalButton>
        <div className="w-full max-w-7xl grid grid-cols-1 lg:grid-cols-[360px_1fr_400px] gap-6 lg:gap-12 items-start">

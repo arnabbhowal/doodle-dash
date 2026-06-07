@@ -9,7 +9,7 @@ import { uploadDrawing, uploadHijackCanvas } from '../../../lib/supabase';
 import { BrutalButton } from '../../components/BrutalButton';
 import { BrutalCard } from '../../components/BrutalCard';
 import { CountUp } from '../../components/CountUp';
-import { startCountdown, stopCountdown, COUNTDOWN_LEAD_MS } from '../../../lib/sounds';
+import { startDrawingMusic, stopDrawingMusic, startCountdown, stopCountdown, playVictory, playConfettiGun, COUNTDOWN_LEAD_MS } from '../../../lib/sounds';
 
 const COLORS = [
   '#000000','#6b7280','#ffffff','#8b5e34',          // black, gray, white, brown
@@ -314,6 +314,8 @@ export default function PlayPage() {
   // Confetti on the finished screen (matches the host's celebration).
   useEffect(() => {
     if (room?.status !== 'finished') return;
+    playVictory();
+    playConfettiGun();
     const end = Date.now() + 2000;
     const colors = ['#FF2E88', '#FFD60A', '#00E08A', '#19D3FF'];
     const frame = () => {
@@ -365,8 +367,10 @@ export default function PlayPage() {
   const hijackBufRef     = useRef<number[][]>([]); // pending [nx,ny,down] points to flush
   const hijackSeqRef     = useRef(0);
   const hijackPadLastPt  = useRef<{ x: number; y: number } | null>(null);
-  const baselineSnapRef  = useRef<string | null>(null); // victim: which hijack we've baselined
   const snapUploadedRef  = useRef<string | null>(null); // victim: which hijack we've snapshotted
+  // Sabotage strokes drawn on MY canvas, kept so Undo can re-apply them (your own
+  // strokes are undoable; the attackers' scribbles are not).
+  const attackerBatchesRef = useRef<{ fromPlayerId: bigint; pts: string; color: string; size: number }[]>([]);
   // Victim → attacker: while hijacked, the victim's own strokes also stream back so the
   // attacker sees them draw live (the shared board). Separate buffer/seq from the
   // attacker path. color/size refs carry the victim's current brush at flush time.
@@ -461,7 +465,7 @@ export default function PlayPage() {
     hijackSeqRef.current = 0;
     hijackPadLastPt.current = null;
     lastBySrcRef.current.clear();
-    baselineSnapRef.current = null;
+    attackerBatchesRef.current = [];
     snapUploadedRef.current = null;
     victimBufRef.current = [];
     victimSeqRef.current = 0;
@@ -524,6 +528,14 @@ export default function PlayPage() {
     const id = setInterval(tick, 200);
     return () => clearInterval(id);
   }, [currentRound?.roundId, room?.status, alreadySubmitted]);
+
+  // ── Sound: while-drawing ambient loop during the round (until you submit) ─────
+  useEffect(() => {
+    if (room?.status === 'in_round' && currentRound && !alreadySubmitted) {
+      startDrawingMusic();
+      return () => stopDrawingMusic();
+    }
+  }, [room?.status, currentRound?.roundId, alreadySubmitted]);
 
   // ── Sound: countdown (final 5s) scheduled to end at 0 ─────────────────────────
   useEffect(() => {
@@ -624,6 +636,17 @@ export default function PlayPage() {
     if (!c || !ctx) return;
     const prev = undoStack.current.pop();
     if (prev) ctx.putImageData(prev, 0, 0);
+    // Re-apply sabotage scribbles on top so Undo only removes YOUR last stroke,
+    // never the attackers' — their vandalism can't be undone away.
+    if (attackerBatchesRef.current.length) {
+      const lastBy = new Map<string, { x: number; y: number } | null>();
+      for (const b of attackerBatchesRef.current) {
+        const key = b.fromPlayerId.toString();
+        const holder = { current: lastBy.get(key) ?? null };
+        drawHijackBatch(c, b, holder);
+        lastBy.set(key, holder.current);
+      }
+    }
     setCanUndo(undoStack.current.length > 0);
   }, []);
 
@@ -638,23 +661,15 @@ export default function PlayPage() {
     if (row.roundId.toString() !== currentRound.roundId.toString()) return;
     // Skip my own strokes echoed back from the board — I already drew them locally.
     if (myPlayerId != null && row.fromPlayerId.toString() === myPlayerId.toString()) return;
-    const target = hijackActive ? hijackPadRef.current : canvasRef.current;
+    const onPad = hijackActive;
+    const target = onPad ? hijackPadRef.current : canvasRef.current;
     const key = row.fromPlayerId.toString();
     const holder = { current: lastBySrcRef.current.get(key) ?? null };
     drawHijackBatch(target, row, holder);
     lastBySrcRef.current.set(key, holder.current);
+    // Record sabotage strokes that landed on MY canvas so Undo re-applies them.
+    if (!onPad) attackerBatchesRef.current.push({ fromPlayerId: row.fromPlayerId, pts: row.pts, color: row.color, size: row.size });
   };
-
-  // The first time a hijack lands on me, snapshot the canvas so a single Undo can wipe
-  // the vandalism (the scribbles are otherwise permanent marks on the canvas).
-  useEffect(() => {
-    if (!hijackSabId) return;
-    const key = hijackSabId.toString();
-    if (baselineSnapRef.current === key) return;
-    baselineSnapRef.current = key;
-    snapshot();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hijackSabId]);
 
   // Victim: when a hijack lands, upload ONE snapshot of my current drawing so the
   // attacker can scribble on top of the real thing (it's their pad background). The

@@ -2,7 +2,7 @@ import { ReactNode } from 'react';
 import { motion, HTMLMotionProps } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import { playClick } from '../../lib/sounds';
+import { playClick, playBack } from '../../lib/sounds';
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -11,6 +11,7 @@ export function cn(...inputs: ClassValue[]) {
 type BrutalButtonProps = HTMLMotionProps<"button"> & {
   color?: 'magenta' | 'yellow' | 'green' | 'cyan' | 'red' | 'surface';
   size?: 'sm' | 'md' | 'lg' | 'xl';
+  sound?: 'click' | 'back' | 'none';
   children: ReactNode;
 };
 
@@ -23,7 +24,7 @@ const shadowColors = {
   surface: '#000000'
 };
 
-export function BrutalButton({ className, color = 'magenta', size = 'md', children, onClick, ...props }: BrutalButtonProps) {
+export function BrutalButton({ className, color = 'magenta', size = 'md', sound = 'click', children, onClick, ...props }: BrutalButtonProps) {
   const sizeClasses = {
     sm: 'px-4 py-2 text-sm border-2 rounded-xl shadow-[2px_2px_0px_0px]',
     md: 'px-6 py-3 text-lg border-[3px] rounded-2xl shadow-[4px_4px_0px_0px]',
@@ -65,7 +66,7 @@ export function BrutalButton({ className, color = 'magenta', size = 'md', childr
         sizeClasses[size],
         className
       )}
-      onClick={(e) => { playClick(); onClick?.(e); }}
+      onClick={(e) => { if (sound === 'back') playBack(); else if (sound !== 'none') playClick(); onClick?.(e); }}
       {...props}
     >
       {children}

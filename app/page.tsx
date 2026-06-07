@@ -87,7 +87,7 @@ export default function Home() {
             <BrutalButton color="cyan" size="xl" onClick={handleJoin} disabled={!joinCode.trim()} className="w-full !text-2xl !py-6">
               Join Game
             </BrutalButton>
-            <BrutalButton color="surface" size="md" onClick={() => { setView('main'); setJoinCode(''); }} className="w-full">
+            <BrutalButton color="surface" size="md" sound="back" onClick={() => { setView('main'); setJoinCode(''); }} className="w-full">
               Back
             </BrutalButton>
           </>
